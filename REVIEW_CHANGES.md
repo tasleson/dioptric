@@ -48,6 +48,6 @@ rasterlab.
 
 ## Search quality
 
-- [ ] Evaluate whether case-insensitive substring matching is sufficient, or
+- [x] Evaluate whether case-insensitive substring matching is sufficient, or
       whether token-based / edit-distance fuzzy matching is needed for
       real-world EXIF strings (e.g. `"EF24-70mm"` vs `"EF 24-70mm"`)

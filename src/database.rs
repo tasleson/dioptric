@@ -398,7 +398,9 @@ impl Database {
     /// Find a camera by maker and model using case-insensitive substring matching.
     ///
     /// Both `maker_query` and `model_query` must appear as substrings of the
-    /// respective camera fields.  Returns the first match.
+    /// respective camera fields.  Matching falls back to ignoring punctuation
+    /// and whitespace for common EXIF formatting differences. Returns the
+    /// first match.
     ///
     /// # Example
     ///
@@ -408,14 +410,13 @@ impl Database {
     /// assert!(cam.is_some());
     /// ```
     pub fn find_camera(&self, maker_query: &str, model_query: &str) -> Option<&Camera> {
-        let mq = maker_query.to_lowercase();
-        let mq2 = model_query.to_lowercase();
-        self.cameras
-            .iter()
-            .find(|c| c.maker.to_lowercase().contains(&mq) && c.model.to_lowercase().contains(&mq2))
+        self.cameras.iter().find(|c| {
+            fuzzy_contains(&c.maker, maker_query) && fuzzy_contains(&c.model, model_query)
+        })
     }
 
-    /// Find a lens by maker and model using case-insensitive substring matching.
+    /// Find a lens by maker and model using case-insensitive substring matching,
+    /// with a fallback that ignores punctuation and whitespace.
     ///
     /// # Example
     ///
@@ -425,15 +426,14 @@ impl Database {
     /// assert!(lens.is_some());
     /// ```
     pub fn find_lens(&self, maker_query: &str, model_query: &str) -> Option<&Lens> {
-        let mq = maker_query.to_lowercase();
-        let mq2 = model_query.to_lowercase();
-        self.lenses
-            .iter()
-            .find(|l| l.maker.to_lowercase().contains(&mq) && l.model.to_lowercase().contains(&mq2))
+        self.lenses.iter().find(|l| {
+            fuzzy_contains(&l.maker, maker_query) && fuzzy_contains(&l.model, model_query)
+        })
     }
 
     /// Find all cameras matching maker and model using case-insensitive
-    /// substring matching.
+    /// substring matching, with a fallback that ignores punctuation and
+    /// whitespace.
     ///
     /// # Example
     ///
@@ -447,15 +447,14 @@ impl Database {
         maker_query: &'a str,
         model_query: &'a str,
     ) -> impl Iterator<Item = &'a Camera> {
-        let mq = maker_query.to_lowercase();
-        let mq2 = model_query.to_lowercase();
         self.cameras.iter().filter(move |c| {
-            c.maker.to_lowercase().contains(&mq) && c.model.to_lowercase().contains(&mq2)
+            fuzzy_contains(&c.maker, maker_query) && fuzzy_contains(&c.model, model_query)
         })
     }
 
     /// Find all lenses matching maker and model using case-insensitive
-    /// substring matching.
+    /// substring matching, with a fallback that ignores punctuation and
+    /// whitespace.
     ///
     /// # Example
     ///
@@ -469,16 +468,14 @@ impl Database {
         maker_query: &'a str,
         model_query: &'a str,
     ) -> impl Iterator<Item = &'a Lens> {
-        let mq = maker_query.to_lowercase();
-        let mq2 = model_query.to_lowercase();
         self.lenses.iter().filter(move |l| {
-            l.maker.to_lowercase().contains(&mq) && l.model.to_lowercase().contains(&mq2)
+            fuzzy_contains(&l.maker, maker_query) && fuzzy_contains(&l.model, model_query)
         })
     }
 
     /// Find a lens using a single query string, matched against the
     /// combined `"maker model"` text using case-insensitive substring
-    /// matching.
+    /// matching, with a fallback that ignores punctuation and whitespace.
     ///
     /// This is useful when the caller only has a single lens description
     /// string (e.g. an EXIF `LensModel` field) without a separate maker.
@@ -491,15 +488,15 @@ impl Database {
     /// assert!(lens.is_some());
     /// ```
     pub fn find_lens_by_name(&self, query: &str) -> Option<&Lens> {
-        let q = query.to_lowercase();
         self.lenses.iter().find(|l| {
-            let full = format!("{} {}", l.maker, l.model).to_lowercase();
-            full.contains(&q)
+            let full = format!("{} {}", l.maker, l.model);
+            fuzzy_contains(&full, query)
         })
     }
 
     /// Find all lenses matching a single query string against the combined
-    /// `"maker model"` text using case-insensitive substring matching.
+    /// `"maker model"` text using case-insensitive substring matching, with a
+    /// fallback that ignores punctuation and whitespace.
     ///
     /// # Example
     ///
@@ -509,15 +506,28 @@ impl Database {
     /// assert!(lenses.len() > 1);
     /// ```
     pub fn find_lenses_by_name(&self, query: &str) -> impl Iterator<Item = &Lens> {
-        let q = query.to_lowercase();
         self.lenses.iter().filter(move |l| {
-            let full = format!("{} {}", l.maker, l.model).to_lowercase();
-            full.contains(&q)
+            let full = format!("{} {}", l.maker, l.model);
+            fuzzy_contains(&full, query)
         })
     }
 }
 
 // ── Interpolation helpers (pub(crate)) ────────────────────────────────────────
+
+fn fuzzy_contains(haystack: &str, needle: &str) -> bool {
+    let haystack_lower = haystack.to_lowercase();
+    let needle_lower = needle.to_lowercase();
+    if haystack_lower.contains(&needle_lower) {
+        return true;
+    }
+
+    normalise_search_text(&haystack_lower).contains(&normalise_search_text(&needle_lower))
+}
+
+fn normalise_search_text(value: &str) -> String {
+    value.chars().filter(|c| c.is_alphanumeric()).collect()
+}
 
 /// Interpolate distortion parameters for the given focal length.
 ///
@@ -818,6 +828,10 @@ mod tests {
         // Partial model-only match (model contains the substring)
         assert!(db.find_lens_by_name("24-70mm").is_some());
 
+        // EXIF strings often omit spaces or punctuation found in lensfun names.
+        assert!(db.find_lens("Canon", "EF24-70mm").is_some());
+        assert!(db.find_lens_by_name("Canon EF24-70mm f28L").is_some());
+
         // No match
         assert!(db.find_lens_by_name("Sigma 50mm").is_none());
     }
@@ -843,6 +857,10 @@ mod tests {
 
         let matches: Vec<_> = db.find_lenses_by_name("Canon EF").collect();
         assert_eq!(matches.len(), 2);
+
+        let compact_matches: Vec<_> = db.find_lenses_by_name("EF70200mm").collect();
+        assert_eq!(compact_matches.len(), 1);
+        assert_eq!(compact_matches[0].model, "EF 70-200mm f/2.8L IS II USM");
     }
 
     #[test]
