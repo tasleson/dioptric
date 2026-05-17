@@ -1,0 +1,15 @@
+The lens calibration database files in the `db/` directory are taken from the
+lensfun project (https://lensfun.github.io/) and are NOT covered by the MIT
+license that applies to the rest of this crate.
+
+Those files are distributed under the Creative Commons
+Attribution-ShareAlike 4.0 International license (CC-BY-SA 4.0).
+
+  https://creativecommons.org/licenses/by-sa/4.0/
+
+Under this license you are free to share and adapt the database for any
+purpose, provided you give appropriate credit to the lensfun contributors and
+distribute any derivative database under the same CC-BY-SA 4.0 terms.
+
+Copyright: the lensfun project contributors
+           https://github.com/lensfun/lensfun

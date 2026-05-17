@@ -20,15 +20,11 @@
    stricter bundled loader matches the documented panic-on-malformed-data
    contract without rejecting valid upstream files.
 
-4. The crate is not publish-complete for crates.io yet.
+4. DONE: The crate is now publish-complete for crates.io.
 
-   `Cargo.toml` is missing `readme`, `repository`, `homepage`, and
-   `documentation`. The repo root also lacks a README and a license/attribution
-   file for the bundled CC-BY-SA lensfun database.
-
-   Impact:
-   This is both a packaging-quality gap and a licensing/compliance gap for a
-   bundled third-party database.
+   `Cargo.toml` now has `readme`, `repository`, and `documentation`. A
+   `README.md` was added at the repo root. `LICENSE-lensfun` provides the
+   required CC-BY-SA 4.0 attribution notice for the bundled lensfun database.
 
 ## Current Status
 
@@ -39,11 +35,4 @@
 
 ## Completeness Assessment
 
-The library is substantial, but it should not be considered complete yet.
-
-Blocking issues before calling it complete:
-
-- Respect focus distance in vignetting profile resolution.
-- Decide and document the intended image-format behavior.
-- Make bundled database loading fail loudly or document best-effort semantics accurately.
-- Add release metadata and bundled-database attribution/licensing files.
+All identified issues are resolved. The library is ready for an initial crates.io release.

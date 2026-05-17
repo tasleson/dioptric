@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "Pure-Rust lens distortion, vignetting, and chromatic aberration correction using the lensfun database"
 license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/tasleson/dioptric"
+documentation = "https://docs.rs/dioptric"
 keywords = ["lens", "correction", "distortion", "vignetting", "lensfun"]
 categories = ["multimedia::images"]
 
