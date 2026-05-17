@@ -269,6 +269,66 @@ fn poly5_distortion_pipeline_warps_raw_f32_pixels() {
     assert_eq!(&corrected[centre_idx..centre_idx + 3], &[4.0, 4.0, 0.25]);
 }
 
+#[test]
+fn ptlens_distortion_pipeline_warps_raw_f32_pixels() {
+    use dioptric::database::{Calibration, DistortionEntry, Lens};
+    use dioptric::models::{DistortionModel, PtLensParams};
+
+    let lens = Lens {
+        maker: "Test".into(),
+        model: "PtLens pipeline".into(),
+        mounts: vec![],
+        crop_factor: Some(1.0),
+        calibration: Calibration {
+            distortions: vec![DistortionEntry {
+                focal: 35.0,
+                model: DistortionModel::PtLens(PtLensParams {
+                    a: 0.0,
+                    b: -0.3,
+                    c: 0.0,
+                }),
+            }],
+            tcas: vec![],
+            vignettings: vec![],
+        },
+    };
+    let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 4.0, 10.0).unwrap();
+    assert!(matches!(
+        profile.distortion,
+        Some(DistortionModel::PtLens(_))
+    ));
+
+    let (width, height, channels) = (8u32, 8u32, 3u32);
+    let src: Vec<f32> = (0..height)
+        .flat_map(|y| (0..width).flat_map(move |x| [x as f32, y as f32, 0.5]))
+        .collect();
+
+    let corrected = profile
+        .correct_distortion_raw_f32(width, height, channels, &src)
+        .unwrap();
+
+    let off_centre_idx = ((width + 1) * channels) as usize;
+    let off_centre = &corrected[off_centre_idx..off_centre_idx + 3];
+    assert!(
+        (0.50..0.75).contains(&off_centre[0]),
+        "off-centre red channel should sample outward, got {}",
+        off_centre[0]
+    );
+    assert!(
+        (0.50..0.75).contains(&off_centre[1]),
+        "off-centre green channel should sample outward, got {}",
+        off_centre[1]
+    );
+    assert!(
+        (off_centre[2] - 0.5).abs() < 1e-6,
+        "constant blue channel should be preserved, got {}",
+        off_centre[2]
+    );
+
+    let centre_idx = ((4 * width + 4) * channels) as usize;
+    assert_eq!(&corrected[centre_idx..centre_idx + 3], &[4.0, 4.0, 0.5]);
+}
+
 // ── Correction smoke tests (DynamicImage API) ─────────────────────────────────
 
 #[cfg(feature = "image")]
