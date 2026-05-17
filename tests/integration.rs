@@ -284,6 +284,7 @@ fn poly5_distortion_pipeline_warps_raw_f32_pixels() {
             vec![DistortionEntry {
                 focal: 35.0,
                 model: DistortionModel::Poly5(Poly5Params { k1: -0.2, k2: 0.04 }),
+                real_focal: None,
             }],
             vec![],
             vec![],
@@ -343,6 +344,7 @@ fn ptlens_distortion_pipeline_warps_raw_f32_pixels() {
                     b: -0.3,
                     c: 0.0,
                 }),
+                real_focal: None,
             }],
             vec![],
             vec![],
@@ -455,6 +457,7 @@ fn barrel_distortion_moves_off_corner_sample_inward() {
             vec![DistortionEntry {
                 focal: 35.0,
                 model: DistortionModel::Poly3(Poly3Params { k1: 0.2 }),
+                real_focal: None,
             }],
             vec![],
             vec![],
@@ -599,6 +602,7 @@ mod image_tests {
                 vec![DistortionEntry {
                     focal: 50.0,
                     model: DistortionModel::Poly3(Poly3Params { k1: 0.0 }),
+                    real_focal: None,
                 }],
                 vec![],
                 vec![],
@@ -640,6 +644,7 @@ mod image_tests {
                 vec![DistortionEntry {
                     focal: 50.0,
                     model: DistortionModel::Poly3(Poly3Params { k1: 0.0 }),
+                    real_focal: None,
                 }],
                 vec![TcaEntry {
                     focal: 50.0,

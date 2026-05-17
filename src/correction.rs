@@ -1835,6 +1835,8 @@ mod tests {
                     },
                 }],
             },
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
         assert!(profile.vignetting.is_some());
@@ -1866,6 +1868,8 @@ mod tests {
             mounts: vec![],
             crop_factor: Some(1.0),
             calibration: Calibration::default(),
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
         assert!(profile.distortion.is_none());
@@ -1885,6 +1889,8 @@ mod tests {
             mounts: vec![],
             crop_factor: Some(1.0),
             calibration: Calibration::default(),
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
 
@@ -1902,6 +1908,8 @@ mod tests {
             mounts: vec![],
             crop_factor: Some(1.0),
             calibration: Calibration::default(),
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
 
@@ -1923,10 +1931,13 @@ mod tests {
                 distortions: vec![DistortionEntry {
                     focal: 50.0,
                     model: DistortionModel::Poly3(Poly3Params { k1: 0.0 }),
+                    real_focal: None,
                 }],
                 tcas: vec![],
                 vignettings: vec![],
             },
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
 
@@ -1981,6 +1992,8 @@ mod tests {
                     },
                 }],
             },
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
 
@@ -2007,6 +2020,8 @@ mod tests {
             mounts: vec![],
             crop_factor: Some(1.0),
             calibration: Calibration::default(),
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
 
@@ -2025,6 +2040,8 @@ mod tests {
             mounts: vec![],
             crop_factor: Some(1.0),
             calibration: Calibration::default(),
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
 
@@ -2046,10 +2063,13 @@ mod tests {
                 distortions: vec![DistortionEntry {
                     focal: 50.0,
                     model: DistortionModel::Poly3(Poly3Params { k1: 0.0 }),
+                    real_focal: None,
                 }],
                 tcas: vec![],
                 vignettings: vec![],
             },
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
 
@@ -2087,6 +2107,8 @@ mod tests {
                     },
                 }],
             },
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
 
@@ -2149,6 +2171,8 @@ mod tests {
                     },
                 }],
             },
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
 
@@ -2175,6 +2199,8 @@ mod tests {
             mounts: vec![],
             crop_factor: Some(1.0),
             calibration: Calibration::default(),
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
 
@@ -2193,6 +2219,8 @@ mod tests {
             mounts: vec![],
             crop_factor: Some(1.0),
             calibration: Calibration::default(),
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
 
@@ -2214,10 +2242,13 @@ mod tests {
                 distortions: vec![DistortionEntry {
                     focal: 50.0,
                     model: DistortionModel::Poly3(Poly3Params { k1: 0.0 }),
+                    real_focal: None,
                 }],
                 tcas: vec![],
                 vignettings: vec![],
             },
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
 
@@ -2258,6 +2289,8 @@ mod tests {
                     },
                 }],
             },
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
 
@@ -2291,6 +2324,7 @@ mod tests {
                 distortions: vec![DistortionEntry {
                     focal: 35.0,
                     model: DistortionModel::Poly3(Poly3Params { k1: 0.2 }),
+                    real_focal: None,
                 }],
                 tcas: vec![TcaEntry {
                     focal: 35.0,
@@ -2298,6 +2332,8 @@ mod tests {
                 }],
                 vignettings: vec![],
             },
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 4.0, 10.0).unwrap();
 
@@ -2358,6 +2394,8 @@ mod tests {
                     },
                 }],
             },
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
         let src = vec![0.75f32; 16 * 16 * 3];
@@ -2396,6 +2434,7 @@ mod tests {
                 distortions: vec![DistortionEntry {
                     focal: 35.0,
                     model: DistortionModel::Poly3(Poly3Params { k1: 0.25 }),
+                    real_focal: None,
                 }],
                 tcas: vec![],
                 vignettings: vec![VignettingEntry {
@@ -2409,6 +2448,8 @@ mod tests {
                     },
                 }],
             },
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
         let src = vec![0.5f32; 16 * 16 * 3];
@@ -2453,6 +2494,7 @@ mod tests {
                 distortions: vec![DistortionEntry {
                     focal: 35.0,
                     model: DistortionModel::Poly3(Poly3Params { k1: 0.2 }),
+                    real_focal: None,
                 }],
                 tcas: vec![TcaEntry {
                     focal: 35.0,
@@ -2460,6 +2502,8 @@ mod tests {
                 }],
                 vignettings: vec![],
             },
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 4.0, 10.0).unwrap();
         let (w, h, ch) = (8, 8, 3);
@@ -2541,6 +2585,7 @@ mod tests {
                 distortions: vec![DistortionEntry {
                     focal: 35.0,
                     model: DistortionModel::Poly3(Poly3Params { k1: -0.01 }),
+                    real_focal: None,
                 }],
                 tcas: vec![],
                 vignettings: vec![VignettingEntry {
@@ -2554,6 +2599,8 @@ mod tests {
                     },
                 }],
             },
+            aspect_ratio: None,
+            projection: None,
         };
         let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
 

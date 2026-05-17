@@ -28,6 +28,8 @@ struct RawCamera {
     models: Vec<String>,
     mount: String,
     cropfactor: f32,
+    #[serde(rename = "aspect-ratio", default)]
+    aspect_ratio: Option<String>,
 }
 
 /// A single calibration `<distortion>` element.
@@ -37,6 +39,8 @@ struct RawDistortion {
     model: String,
     #[serde(rename = "@focal")]
     focal: f32,
+    #[serde(rename = "@real-focal", default)]
+    real_focal: Option<f32>,
     #[serde(rename = "@a", default)]
     a: f32,
     #[serde(rename = "@b", default)]
@@ -121,6 +125,10 @@ struct RawLens {
     #[serde(rename = "mount", default)]
     mounts: Vec<String>,
     cropfactor: Option<f32>,
+    #[serde(rename = "aspect-ratio", default)]
+    aspect_ratio: Option<String>,
+    #[serde(rename = "type", default)]
+    lens_type: Option<String>,
     #[serde(rename = "calibration", default)]
     calibration: Option<RawCalibration>,
 }
@@ -147,6 +155,103 @@ struct RawMount {
 
 // ── Public structs ────────────────────────────────────────────────────────────
 
+/// Frame aspect ratio (width:height).
+///
+/// Parsed from Lensfun `<aspect-ratio>` values like `"3:2"`, `"4:3"`, or
+/// `"16:9"`. A bare decimal such as `"1.5"` is also accepted and treated as
+/// width-over-height. Lensfun's default when the element is absent is 3:2.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AspectRatio {
+    width: f32,
+    height: f32,
+}
+
+impl AspectRatio {
+    /// Lensfun's default aspect ratio (3:2) used when the element is absent.
+    pub const DEFAULT: AspectRatio = AspectRatio {
+        width: 3.0,
+        height: 2.0,
+    };
+
+    /// Width relative to height.
+    pub fn width(self) -> f32 {
+        self.width
+    }
+
+    /// Height relative to width.
+    pub fn height(self) -> f32 {
+        self.height
+    }
+
+    /// Width divided by height.
+    pub fn ratio(self) -> f32 {
+        self.width / self.height
+    }
+
+    fn parse(text: &str) -> Option<AspectRatio> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if let Some((w, h)) = trimmed.split_once(':') {
+            let width: f32 = w.trim().parse().ok()?;
+            let height: f32 = h.trim().parse().ok()?;
+            if width > 0.0 && height > 0.0 {
+                return Some(AspectRatio { width, height });
+            }
+            return None;
+        }
+        let ratio: f32 = trimmed.parse().ok()?;
+        if ratio > 0.0 {
+            Some(AspectRatio {
+                width: ratio,
+                height: 1.0,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+/// Lens projection type, mirroring Lensfun's `<type>` element.
+///
+/// Defaults to [`Rectilinear`](Self::Rectilinear) when the element is absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LensProjection {
+    /// Standard perspective projection (Lensfun: `rectilinear`).
+    Rectilinear,
+    /// Equidistant fisheye (Lensfun: `fisheye`).
+    Fisheye,
+    /// Cylindrical panoramic projection (Lensfun: `panoramic`).
+    Panoramic,
+    /// Equirectangular (Lensfun: `equirectangular`).
+    Equirectangular,
+    /// Orthographic fisheye (Lensfun: `orthographic`).
+    FisheyeOrthographic,
+    /// Stereographic fisheye (Lensfun: `stereographic`).
+    FisheyeStereographic,
+    /// Equisolid-angle fisheye (Lensfun: `equisolid`).
+    FisheyeEquisolid,
+    /// Thoby fisheye (Lensfun: `thoby`).
+    FisheyeThoby,
+}
+
+impl LensProjection {
+    fn parse(value: &str) -> Option<LensProjection> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "rectilinear" => Some(LensProjection::Rectilinear),
+            "fisheye" => Some(LensProjection::Fisheye),
+            "panoramic" => Some(LensProjection::Panoramic),
+            "equirectangular" => Some(LensProjection::Equirectangular),
+            "orthographic" | "fisheye_orthographic" => Some(LensProjection::FisheyeOrthographic),
+            "stereographic" | "fisheye_stereographic" => Some(LensProjection::FisheyeStereographic),
+            "equisolid" | "fisheye_equisolid" => Some(LensProjection::FisheyeEquisolid),
+            "thoby" | "fisheye_thoby" => Some(LensProjection::FisheyeThoby),
+            _ => None,
+        }
+    }
+}
+
 /// A camera body from the lensfun database.
 #[derive(Debug, Clone)]
 pub struct Camera {
@@ -158,6 +263,8 @@ pub struct Camera {
     mount: String,
     /// Sensor crop factor relative to 35 mm full frame.
     crop_factor: f32,
+    /// Sensor aspect ratio (parsed from `<aspect-ratio>` when present).
+    aspect_ratio: Option<AspectRatio>,
 }
 
 impl Camera {
@@ -180,6 +287,20 @@ impl Camera {
     pub fn crop_factor(&self) -> f32 {
         self.crop_factor
     }
+
+    /// Sensor aspect ratio as declared in the database, or `None` if absent.
+    ///
+    /// Use [`Self::aspect_ratio_or_default`] to fall back to Lensfun's default
+    /// 3:2 when the database entry omits the field.
+    pub fn aspect_ratio(&self) -> Option<AspectRatio> {
+        self.aspect_ratio
+    }
+
+    /// Sensor aspect ratio, falling back to [`AspectRatio::DEFAULT`] (3:2)
+    /// when the database does not specify one. Matches Lensfun's behaviour.
+    pub fn aspect_ratio_or_default(&self) -> AspectRatio {
+        self.aspect_ratio.unwrap_or(AspectRatio::DEFAULT)
+    }
 }
 
 /// A calibrated focal-length point for distortion.
@@ -187,6 +308,11 @@ impl Camera {
 pub struct DistortionEntry {
     pub focal: f32,
     pub model: DistortionModel,
+    /// Geometrically effective focal length after distortion is applied,
+    /// when the calibration provides it. Lensfun uses this for autoscaling
+    /// the corrected image so the field of view matches expectations on
+    /// wide and fisheye lenses.
+    pub real_focal: Option<f32>,
 }
 
 /// A calibrated focal-length point for TCA.
@@ -254,6 +380,11 @@ pub struct Lens {
     pub(crate) mounts: Vec<String>,
     /// Nominal crop factor.
     pub(crate) crop_factor: Option<f32>,
+    /// Calibration aspect ratio (parsed from `<aspect-ratio>` when present).
+    pub(crate) aspect_ratio: Option<AspectRatio>,
+    /// Lens projection type. `None` means the database entry did not specify
+    /// one, which Lensfun treats as [`LensProjection::Rectilinear`].
+    pub(crate) projection: Option<LensProjection>,
     /// Available calibration data.
     pub(crate) calibration: Calibration,
 }
@@ -272,6 +403,8 @@ impl Lens {
             model: model.into(),
             mounts,
             crop_factor,
+            aspect_ratio: None,
+            projection: None,
             calibration,
         }
     }
@@ -294,6 +427,35 @@ impl Lens {
     /// Nominal crop factor.
     pub fn crop_factor(&self) -> Option<f32> {
         self.crop_factor
+    }
+
+    /// Calibration aspect ratio as declared in the database, or `None` if
+    /// absent.
+    ///
+    /// Use [`Self::aspect_ratio_or_default`] to fall back to Lensfun's
+    /// default 3:2.
+    pub fn aspect_ratio(&self) -> Option<AspectRatio> {
+        self.aspect_ratio
+    }
+
+    /// Calibration aspect ratio, falling back to [`AspectRatio::DEFAULT`]
+    /// (3:2) when the database does not specify one.
+    pub fn aspect_ratio_or_default(&self) -> AspectRatio {
+        self.aspect_ratio.unwrap_or(AspectRatio::DEFAULT)
+    }
+
+    /// Lens projection type as declared in the database, or `None` if absent.
+    ///
+    /// Use [`Self::projection_or_default`] to fall back to
+    /// [`LensProjection::Rectilinear`].
+    pub fn projection(&self) -> Option<LensProjection> {
+        self.projection
+    }
+
+    /// Lens projection type, falling back to [`LensProjection::Rectilinear`]
+    /// when the database does not specify one. Matches Lensfun's behaviour.
+    pub fn projection_or_default(&self) -> LensProjection {
+        self.projection.unwrap_or(LensProjection::Rectilinear)
     }
 
     /// Calibration data for this lens.
@@ -425,6 +587,7 @@ fn convert_lens(raw: RawLens) -> Lens {
                         cal.distortions.push(DistortionEntry {
                             focal: d.focal,
                             model,
+                            real_focal: d.real_focal,
                         });
                     }
                 }
@@ -454,11 +617,19 @@ fn convert_lens(raw: RawLens) -> Lens {
         }
     }
 
+    let aspect_ratio = raw
+        .aspect_ratio
+        .as_deref()
+        .and_then(AspectRatio::parse);
+    let projection = raw.lens_type.as_deref().and_then(LensProjection::parse);
+
     Lens {
         maker,
         model,
         mounts: raw.mounts,
         crop_factor: raw.cropfactor,
+        aspect_ratio,
+        projection,
         calibration: cal,
     }
 }
@@ -469,6 +640,7 @@ fn convert_camera(raw: RawCamera) -> Camera {
         model: raw.models.into_iter().next().unwrap_or_default(),
         mount: raw.mount,
         crop_factor: raw.cropfactor,
+        aspect_ratio: raw.aspect_ratio.as_deref().and_then(AspectRatio::parse),
     }
 }
 
@@ -1087,6 +1259,115 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parse_aspect_ratio_and_projection_and_real_focal() {
+        let xml = r#"<lensdatabase version="2">
+  <camera>
+    <maker>Acme</maker>
+    <model>Acme Compact</model>
+    <mount>fixed</mount>
+    <cropfactor>5.6</cropfactor>
+    <aspect-ratio>4:3</aspect-ratio>
+  </camera>
+  <camera>
+    <maker>Acme</maker>
+    <model>Acme SLR</model>
+    <mount>M42</mount>
+    <cropfactor>1.0</cropfactor>
+  </camera>
+  <lens>
+    <maker>Acme</maker>
+    <model>Acme Fisheye 8mm</model>
+    <mount>M42</mount>
+    <type>equisolid</type>
+    <cropfactor>1.0</cropfactor>
+    <aspect-ratio>3:2</aspect-ratio>
+    <calibration>
+      <distortion model="ptlens" focal="8" a="0.05" b="-0.12" c="0.10" real-focal="8.4"/>
+      <distortion model="poly3" focal="35" k1="-0.005"/>
+    </calibration>
+  </lens>
+  <lens>
+    <maker>Acme</maker>
+    <model>Acme Rectilinear 50mm</model>
+    <mount>M42</mount>
+    <cropfactor>1.0</cropfactor>
+  </lens>
+</lensdatabase>"#;
+
+        let mut db = Database::empty();
+        db.load_xml(xml).expect("parse should succeed");
+
+        let compact = db.find_camera("Acme", "Compact").unwrap();
+        let compact_ar = compact.aspect_ratio().expect("aspect-ratio parsed");
+        assert!((compact_ar.ratio() - 4.0 / 3.0).abs() < 1e-6);
+
+        let slr = db.find_camera("Acme", "SLR").unwrap();
+        assert!(slr.aspect_ratio().is_none());
+        assert_eq!(slr.aspect_ratio_or_default(), AspectRatio::DEFAULT);
+
+        let fisheye = db.find_lenses("Acme", "Fisheye").next().unwrap();
+        assert_eq!(fisheye.projection(), Some(LensProjection::FisheyeEquisolid));
+        assert_eq!(
+            fisheye.aspect_ratio().map(AspectRatio::ratio),
+            Some(1.5),
+        );
+        assert_eq!(fisheye.calibration.distortions[0].real_focal, Some(8.4));
+        assert_eq!(fisheye.calibration.distortions[1].real_focal, None);
+
+        let rectilinear = db.find_lenses("Acme", "Rectilinear").next().unwrap();
+        assert_eq!(rectilinear.projection(), None);
+        assert_eq!(
+            rectilinear.projection_or_default(),
+            LensProjection::Rectilinear,
+        );
+        assert!(rectilinear.aspect_ratio().is_none());
+    }
+
+    #[test]
+    fn aspect_ratio_parse_accepts_decimal_and_rejects_garbage() {
+        assert_eq!(
+            AspectRatio::parse("16:9").map(AspectRatio::ratio),
+            Some(16.0 / 9.0),
+        );
+        assert_eq!(
+            AspectRatio::parse("1.5").map(AspectRatio::ratio),
+            Some(1.5),
+        );
+        assert!(AspectRatio::parse("").is_none());
+        assert!(AspectRatio::parse("not a ratio").is_none());
+        assert!(AspectRatio::parse("0:1").is_none());
+    }
+
+    #[test]
+    fn lens_projection_parses_aliases() {
+        assert_eq!(
+            LensProjection::parse("rectilinear"),
+            Some(LensProjection::Rectilinear),
+        );
+        assert_eq!(
+            LensProjection::parse("Fisheye"),
+            Some(LensProjection::Fisheye),
+        );
+        assert_eq!(
+            LensProjection::parse("stereographic"),
+            Some(LensProjection::FisheyeStereographic),
+        );
+        assert_eq!(
+            LensProjection::parse("equisolid"),
+            Some(LensProjection::FisheyeEquisolid),
+        );
+        assert_eq!(
+            LensProjection::parse("orthographic"),
+            Some(LensProjection::FisheyeOrthographic),
+        );
+        assert_eq!(
+            LensProjection::parse("thoby"),
+            Some(LensProjection::FisheyeThoby),
+        );
+        assert!(LensProjection::parse("unknown").is_none());
+    }
+
+    #[test]
     fn parse_minimal_xml() {
         let xml = r#"<lensdatabase version="2">
   <camera>
@@ -1453,10 +1734,12 @@ mod tests {
             DistortionEntry {
                 focal: 24.0,
                 model: DistortionModel::Poly3(Poly3Params { k1: -0.01 }),
+                real_focal: None,
             },
             DistortionEntry {
                 focal: 70.0,
                 model: DistortionModel::Poly3(Poly3Params { k1: 0.01 }),
+                real_focal: None,
             },
         ];
         // Below range
@@ -1483,10 +1766,12 @@ mod tests {
             DistortionEntry {
                 focal: 70.0,
                 model: DistortionModel::Poly3(Poly3Params { k1: 0.01 }),
+                real_focal: None,
             },
             DistortionEntry {
                 focal: 24.0,
                 model: DistortionModel::Poly3(Poly3Params { k1: -0.01 }),
+                real_focal: None,
             },
         ];
 

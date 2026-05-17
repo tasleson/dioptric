@@ -110,5 +110,7 @@ pub use correction::{
     Coordinate, CoordinateMapOptions, CorrectionOptions, CorrectionProfile,
     CorrectionProfileBuilder, SubpixelCoordinates, TransformMode,
 };
-pub use database::{Database, LensMatch, LensMountMatch, MountCompatibility};
+pub use database::{
+    AspectRatio, Database, LensMatch, LensMountMatch, LensProjection, MountCompatibility,
+};
 pub use error::{Error, Result};
