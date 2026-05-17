@@ -42,9 +42,10 @@
 //!
 //! ## Database lookup
 //!
-//! [`Database::find_camera`] and [`Database::find_lens`] perform
-//! case-insensitive substring matching, so EXIF strings rarely need to match
-//! exactly.
+//! [`Database::find_camera`] and [`Database::find_lens`] return the first
+//! match; [`Database::find_cameras`] and [`Database::find_lenses`] return
+//! iterators over all matches.  All four perform case-insensitive substring
+//! matching, so EXIF strings rarely need to match exactly.
 
 pub mod correction;
 pub mod database;

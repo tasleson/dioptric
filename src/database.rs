@@ -431,6 +431,50 @@ impl Database {
             .iter()
             .find(|l| l.maker.to_lowercase().contains(&mq) && l.model.to_lowercase().contains(&mq2))
     }
+
+    /// Find all cameras matching maker and model using case-insensitive
+    /// substring matching.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let db = dioptric::Database::bundled();
+    /// let cameras: Vec<_> = db.find_cameras("Canon", "EOS").collect();
+    /// assert!(cameras.len() > 1);
+    /// ```
+    pub fn find_cameras<'a>(
+        &'a self,
+        maker_query: &'a str,
+        model_query: &'a str,
+    ) -> impl Iterator<Item = &'a Camera> {
+        let mq = maker_query.to_lowercase();
+        let mq2 = model_query.to_lowercase();
+        self.cameras.iter().filter(move |c| {
+            c.maker.to_lowercase().contains(&mq) && c.model.to_lowercase().contains(&mq2)
+        })
+    }
+
+    /// Find all lenses matching maker and model using case-insensitive
+    /// substring matching.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let db = dioptric::Database::bundled();
+    /// let lenses: Vec<_> = db.find_lenses("Canon", "EF").collect();
+    /// assert!(lenses.len() > 1);
+    /// ```
+    pub fn find_lenses<'a>(
+        &'a self,
+        maker_query: &'a str,
+        model_query: &'a str,
+    ) -> impl Iterator<Item = &'a Lens> {
+        let mq = maker_query.to_lowercase();
+        let mq2 = model_query.to_lowercase();
+        self.lenses.iter().filter(move |l| {
+            l.maker.to_lowercase().contains(&mq) && l.model.to_lowercase().contains(&mq2)
+        })
+    }
 }
 
 // ── Interpolation helpers (pub(crate)) ────────────────────────────────────────
