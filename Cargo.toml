@@ -10,9 +10,13 @@ documentation = "https://docs.rs/dioptric"
 keywords = ["lens", "correction", "distortion", "vignetting", "lensfun"]
 categories = ["multimedia::images"]
 
+[features]
+default = ["image"]
+image = ["dep:image"]
+
 [dependencies]
 quick-xml = { version = "0.37", features = ["serialize"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 include_dir = "0.7"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }

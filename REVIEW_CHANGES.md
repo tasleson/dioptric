@@ -15,7 +15,7 @@ rasterlab.
 
 ## Data representation
 
-- [ ] Add a raw-slice or trait-based correction API that operates on
+- [x] Add a raw-slice or trait-based correction API that operates on
       `(width, height, &mut [u8])` so callers without the `image` crate can use
       dioptric without round-trip copies
 - [ ] Support f32 linear pixel data in the correction pipeline to avoid

@@ -27,6 +27,18 @@ pub enum Error {
     #[error("unsupported image format: {0}")]
     UnsupportedImageFormat(String),
 
+    /// The supplied buffer length does not match `width × height × channels`.
+    #[error(
+        "buffer length {actual} does not match expected {expected} (width={width} × height={height} × channels={channels})"
+    )]
+    InvalidBufferLength {
+        expected: usize,
+        actual: usize,
+        width: u32,
+        height: u32,
+        channels: u32,
+    },
+
     /// The lens calibration has no entries for the requested correction type.
     #[error("no calibration data available for {0}")]
     NoCalibration(String),

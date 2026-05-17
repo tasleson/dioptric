@@ -29,6 +29,19 @@
 //!
 //! ## Corrections
 //!
+//! The raw-slice methods operate on `&[u8]` / `&mut [u8]` buffers directly and
+//! have no dependency on the `image` crate:
+//!
+//! | Method | Description |
+//! |--------|-------------|
+//! | [`CorrectionProfile::correct_all_raw`] | Distortion + TCA + vignetting |
+//! | [`CorrectionProfile::correct_distortion_raw`] | Geometric warp only |
+//! | [`CorrectionProfile::correct_vignetting_raw`] | In-place brightness correction |
+//! | [`CorrectionProfile::correct_tca_raw`] | Per-channel warp only |
+//!
+//! With the `image` feature (enabled by default), convenience methods that
+//! accept `image::DynamicImage` are also available:
+//!
 //! | Method | Description |
 //! |--------|-------------|
 //! | [`CorrectionProfile::correct_all`] | Distortion + TCA + vignetting |
@@ -36,9 +49,8 @@
 //! | [`CorrectionProfile::correct_vignetting`] | In-place brightness correction |
 //! | [`CorrectionProfile::correct_tca`] | Per-channel warp only |
 //!
-//! The image correction API currently supports `DynamicImage::ImageRgb8` and
-//! `DynamicImage::ImageRgba8`. `Rgba8` inputs preserve alpha; other image
-//! formats return [`Error::UnsupportedImageFormat`].
+//! Both APIs support 3-channel (RGB) and 4-channel (RGBA) data. `Rgba` inputs
+//! preserve alpha; unsupported formats return [`Error::UnsupportedImageFormat`].
 //!
 //! ## Database lookup
 //!
