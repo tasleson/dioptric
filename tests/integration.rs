@@ -383,6 +383,54 @@ fn tca_poly3_pipeline_warps_red_and_blue_raw_f32_channels() {
     );
 }
 
+#[test]
+fn barrel_distortion_moves_corner_sample_inward() {
+    use dioptric::database::{Calibration, DistortionEntry, Lens};
+    use dioptric::models::{DistortionModel, Poly3Params};
+
+    let lens = Lens {
+        maker: "Test".into(),
+        model: "Barrel warp".into(),
+        mounts: vec![],
+        crop_factor: Some(1.0),
+        calibration: Calibration {
+            distortions: vec![DistortionEntry {
+                focal: 35.0,
+                model: DistortionModel::Poly3(Poly3Params { k1: -0.2 }),
+            }],
+            tcas: vec![],
+            vignettings: vec![],
+        },
+    };
+    let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 4.0, 10.0).unwrap();
+
+    let (width, height, channels) = (8u32, 8u32, 3u32);
+    let src: Vec<f32> = (0..height)
+        .flat_map(|y| (0..width).flat_map(move |x| [x as f32, y as f32, 1.0]))
+        .collect();
+
+    let corrected = profile
+        .correct_distortion_raw_f32(width, height, channels, &src)
+        .unwrap();
+    let corner = &corrected[0..3];
+
+    assert!(
+        (0.75..0.85).contains(&corner[0]),
+        "barrel distortion should sample the top-left red channel inward, got {}",
+        corner[0]
+    );
+    assert!(
+        (0.75..0.85).contains(&corner[1]),
+        "barrel distortion should sample the top-left green channel inward, got {}",
+        corner[1]
+    );
+    assert!(
+        (corner[2] - 1.0).abs() < 1e-6,
+        "constant channel should be preserved, got {}",
+        corner[2]
+    );
+}
+
 // ── Correction smoke tests (DynamicImage API) ─────────────────────────────────
 
 #[cfg(feature = "image")]
