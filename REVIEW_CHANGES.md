@@ -7,7 +7,7 @@ rasterlab.
 
 - [x] Add `find_cameras` / `find_lenses` methods returning iterators over all
       matches, not just the first
-- [ ] Add a single-string lens search variant (rasterlab has `lens_model` but
+- [x] Add a single-string lens search variant (rasterlab has `lens_model` but
       no separate `lens_make`)
 - [ ] Remove the `from_xml_files` reference in the `Database` doc comment (the
       method does not exist), or implement it

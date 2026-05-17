@@ -46,6 +46,11 @@
 //! match; [`Database::find_cameras`] and [`Database::find_lenses`] return
 //! iterators over all matches.  All four perform case-insensitive substring
 //! matching, so EXIF strings rarely need to match exactly.
+//!
+//! [`Database::find_lens_by_name`] and [`Database::find_lenses_by_name`]
+//! accept a single query string matched against the combined `"maker model"`
+//! text — useful when only an EXIF `LensModel` field is available without a
+//! separate maker.
 
 pub mod correction;
 pub mod database;

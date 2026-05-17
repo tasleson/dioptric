@@ -475,6 +475,46 @@ impl Database {
             l.maker.to_lowercase().contains(&mq) && l.model.to_lowercase().contains(&mq2)
         })
     }
+
+    /// Find a lens using a single query string, matched against the
+    /// combined `"maker model"` text using case-insensitive substring
+    /// matching.
+    ///
+    /// This is useful when the caller only has a single lens description
+    /// string (e.g. an EXIF `LensModel` field) without a separate maker.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let db = dioptric::Database::bundled();
+    /// let lens = db.find_lens_by_name("Canon EF 24-70mm f/2.8L II USM");
+    /// assert!(lens.is_some());
+    /// ```
+    pub fn find_lens_by_name(&self, query: &str) -> Option<&Lens> {
+        let q = query.to_lowercase();
+        self.lenses.iter().find(|l| {
+            let full = format!("{} {}", l.maker, l.model).to_lowercase();
+            full.contains(&q)
+        })
+    }
+
+    /// Find all lenses matching a single query string against the combined
+    /// `"maker model"` text using case-insensitive substring matching.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let db = dioptric::Database::bundled();
+    /// let lenses: Vec<_> = db.find_lenses_by_name("Canon EF").collect();
+    /// assert!(lenses.len() > 1);
+    /// ```
+    pub fn find_lenses_by_name(&self, query: &str) -> impl Iterator<Item = &Lens> {
+        let q = query.to_lowercase();
+        self.lenses.iter().filter(move |l| {
+            let full = format!("{} {}", l.maker, l.model).to_lowercase();
+            full.contains(&q)
+        })
+    }
 }
 
 // ── Interpolation helpers (pub(crate)) ────────────────────────────────────────
@@ -741,6 +781,62 @@ mod tests {
         assert!(db.find_camera("canon", "5d mark iii").is_some());
         assert!(db.find_camera("CANON", "EOS 5D").is_some());
         assert!(db.find_camera("nikon", "5d mark iii").is_none());
+    }
+
+    #[test]
+    fn find_lens_by_name_single_string() {
+        let xml = r#"<lensdatabase version="2">
+  <lens>
+    <maker>Canon</maker>
+    <model>EF 24-70mm f/2.8L II USM</model>
+    <mount>Canon EF</mount>
+    <cropfactor>1.0</cropfactor>
+  </lens>
+  <lens>
+    <maker>Nikon</maker>
+    <model>AF-S 70-200mm f/2.8E FL ED VR</model>
+    <mount>Nikon F</mount>
+    <cropfactor>1.0</cropfactor>
+  </lens>
+</lensdatabase>"#;
+        let mut db = Database::empty();
+        db.from_xml(xml).unwrap();
+
+        // Match against combined "maker model"
+        assert!(db.find_lens_by_name("Canon EF 24-70").is_some());
+        assert!(db.find_lens_by_name("Nikon AF-S 70-200").is_some());
+
+        // Case-insensitive
+        assert!(db.find_lens_by_name("canon ef 24-70").is_some());
+
+        // Partial model-only match (model contains the substring)
+        assert!(db.find_lens_by_name("24-70mm").is_some());
+
+        // No match
+        assert!(db.find_lens_by_name("Sigma 50mm").is_none());
+    }
+
+    #[test]
+    fn find_lenses_by_name_returns_multiple() {
+        let xml = r#"<lensdatabase version="2">
+  <lens>
+    <maker>Canon</maker>
+    <model>EF 24-70mm f/2.8L II USM</model>
+    <mount>Canon EF</mount>
+    <cropfactor>1.0</cropfactor>
+  </lens>
+  <lens>
+    <maker>Canon</maker>
+    <model>EF 70-200mm f/2.8L IS II USM</model>
+    <mount>Canon EF</mount>
+    <cropfactor>1.0</cropfactor>
+  </lens>
+</lensdatabase>"#;
+        let mut db = Database::empty();
+        db.from_xml(xml).unwrap();
+
+        let matches: Vec<_> = db.find_lenses_by_name("Canon EF").collect();
+        assert_eq!(matches.len(), 2);
     }
 
     #[test]
