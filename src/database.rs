@@ -128,10 +128,21 @@ struct RawLens {
 /// Top-level `<lensdatabase>` element.
 #[derive(Debug, Deserialize)]
 struct RawLensDatabase {
+    #[serde(rename = "mount", default)]
+    mounts: Vec<RawMount>,
     #[serde(rename = "camera", default)]
     cameras: Vec<RawCamera>,
     #[serde(rename = "lens", default)]
     lenses: Vec<RawLens>,
+}
+
+/// A top-level `<mount>` compatibility record.
+#[derive(Debug, Deserialize)]
+struct RawMount {
+    #[serde(rename = "name", default)]
+    names: Vec<String>,
+    #[serde(rename = "compat", default)]
+    compatible_mounts: Vec<String>,
 }
 
 // ── Public structs ────────────────────────────────────────────────────────────
@@ -140,16 +151,31 @@ struct RawLensDatabase {
 #[derive(Debug, Clone)]
 pub struct Camera {
     /// Manufacturer name (first language-neutral entry).
-    pub maker: String,
+    maker: String,
     /// Model name (first language-neutral entry).
-    pub model: String,
+    model: String,
     /// Mount type.
-    pub mount: String,
+    mount: String,
     /// Sensor crop factor relative to 35 mm full frame.
-    pub crop_factor: f32,
+    crop_factor: f32,
 }
 
 impl Camera {
+    /// Manufacturer name.
+    pub fn maker(&self) -> &str {
+        &self.maker
+    }
+
+    /// Model name.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Mount type.
+    pub fn mount(&self) -> &str {
+        &self.mount
+    }
+
     /// Sensor crop factor relative to 35 mm full frame.
     pub fn crop_factor(&self) -> f32 {
         self.crop_factor
@@ -182,24 +208,172 @@ pub struct VignettingEntry {
 /// Calibration data attached to a lens.
 #[derive(Debug, Clone, Default)]
 pub struct Calibration {
-    pub distortions: Vec<DistortionEntry>,
-    pub tcas: Vec<TcaEntry>,
-    pub vignettings: Vec<VignettingEntry>,
+    pub(crate) distortions: Vec<DistortionEntry>,
+    pub(crate) tcas: Vec<TcaEntry>,
+    pub(crate) vignettings: Vec<VignettingEntry>,
+}
+
+impl Calibration {
+    /// Build calibration data from distortion, TCA, and vignetting entries.
+    pub fn new(
+        distortions: Vec<DistortionEntry>,
+        tcas: Vec<TcaEntry>,
+        vignettings: Vec<VignettingEntry>,
+    ) -> Self {
+        Self {
+            distortions,
+            tcas,
+            vignettings,
+        }
+    }
+
+    /// Distortion calibration entries.
+    pub fn distortions(&self) -> &[DistortionEntry] {
+        &self.distortions
+    }
+
+    /// TCA calibration entries.
+    pub fn tcas(&self) -> &[TcaEntry] {
+        &self.tcas
+    }
+
+    /// Vignetting calibration entries.
+    pub fn vignettings(&self) -> &[VignettingEntry] {
+        &self.vignettings
+    }
 }
 
 /// A lens from the lensfun database.
 #[derive(Debug, Clone)]
 pub struct Lens {
     /// Manufacturer name.
-    pub maker: String,
+    pub(crate) maker: String,
     /// Model name.
-    pub model: String,
+    pub(crate) model: String,
     /// Compatible mount names.
-    pub mounts: Vec<String>,
+    pub(crate) mounts: Vec<String>,
     /// Nominal crop factor.
-    pub crop_factor: Option<f32>,
+    pub(crate) crop_factor: Option<f32>,
     /// Available calibration data.
-    pub calibration: Calibration,
+    pub(crate) calibration: Calibration,
+}
+
+impl Lens {
+    /// Build a lens profile from parsed or synthetic calibration data.
+    pub fn new(
+        maker: impl Into<String>,
+        model: impl Into<String>,
+        mounts: Vec<String>,
+        crop_factor: Option<f32>,
+        calibration: Calibration,
+    ) -> Self {
+        Self {
+            maker: maker.into(),
+            model: model.into(),
+            mounts,
+            crop_factor,
+            calibration,
+        }
+    }
+
+    /// Manufacturer name.
+    pub fn maker(&self) -> &str {
+        &self.maker
+    }
+
+    /// Model name.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Compatible mount names.
+    pub fn mounts(&self) -> &[String] {
+        &self.mounts
+    }
+
+    /// Nominal crop factor.
+    pub fn crop_factor(&self) -> Option<f32> {
+        self.crop_factor
+    }
+
+    /// Calibration data for this lens.
+    pub fn calibration(&self) -> &Calibration {
+        &self.calibration
+    }
+}
+
+/// A top-level Lensfun mount compatibility record.
+#[derive(Debug, Clone)]
+pub struct MountCompatibility {
+    /// Mount name.
+    mount: String,
+    /// Lens mounts accepted by this camera mount.
+    compatible_mounts: Vec<String>,
+}
+
+impl MountCompatibility {
+    /// Mount name.
+    pub fn mount(&self) -> &str {
+        &self.mount
+    }
+
+    /// Lens mounts accepted by this camera mount.
+    pub fn compatible_mounts(&self) -> &[String] {
+        &self.compatible_mounts
+    }
+}
+
+/// How a lens mount relates to a camera mount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LensMountMatch {
+    /// Lens and camera mounts are the same after Lensfun-style normalisation.
+    Exact,
+    /// The camera mount declares the lens mount as compatible.
+    Compatible,
+    /// The lens has no mount data, so compatibility could not be verified.
+    Unknown,
+}
+
+/// A ranked camera-aware lens lookup result.
+#[derive(Debug, Clone, Copy)]
+pub struct LensMatch<'a> {
+    /// Matching lens profile.
+    lens: &'a Lens,
+    /// Mount compatibility class used for ranking.
+    mount_match: LensMountMatch,
+    /// Absolute crop-factor delta, or `None` if the lens profile has no crop.
+    crop_factor_delta: Option<f32>,
+    /// Number of calibration data types present on the profile.
+    calibration_types: usize,
+    /// Total calibration entry count across all data types.
+    calibration_entries: usize,
+}
+
+impl<'a> LensMatch<'a> {
+    /// Matching lens profile.
+    pub fn lens(&self) -> &'a Lens {
+        self.lens
+    }
+
+    /// Mount compatibility class used for ranking.
+    pub fn mount_match(&self) -> LensMountMatch {
+        self.mount_match
+    }
+
+    /// Absolute crop-factor delta, or `None` if the lens profile has no crop.
+    pub fn crop_factor_delta(&self) -> Option<f32> {
+        self.crop_factor_delta
+    }
+
+    /// Number of calibration data types present on the profile.
+    pub fn calibration_types(&self) -> usize {
+        self.calibration_types
+    }
+
+    /// Total calibration entry count across all data types.
+    pub fn calibration_entries(&self) -> usize {
+        self.calibration_entries
+    }
 }
 
 // ── Conversion helpers ────────────────────────────────────────────────────────
@@ -298,12 +472,29 @@ fn convert_camera(raw: RawCamera) -> Camera {
     }
 }
 
+fn convert_mount(raw: RawMount) -> Option<MountCompatibility> {
+    let mount = raw.names.into_iter().next()?.trim().to_owned();
+    if mount.is_empty() {
+        return None;
+    }
+
+    Some(MountCompatibility {
+        mount,
+        compatible_mounts: raw
+            .compatible_mounts
+            .into_iter()
+            .map(|mount| mount.trim().to_owned())
+            .filter(|mount| !mount.is_empty())
+            .collect(),
+    })
+}
+
 // ── Database ──────────────────────────────────────────────────────────────────
 
 /// The parsed lensfun database.
 ///
 /// Load from the bundled data with [`Database::bundled`], or parse arbitrary
-/// XML with [`Database::from_xml`].
+/// XML with [`Database::load_xml`].
 ///
 /// # Example
 ///
@@ -315,6 +506,7 @@ fn convert_camera(raw: RawCamera) -> Camera {
 pub struct Database {
     pub(crate) cameras: Vec<Camera>,
     pub(crate) lenses: Vec<Lens>,
+    pub(crate) mounts: Vec<MountCompatibility>,
 }
 
 impl Database {
@@ -331,6 +523,7 @@ impl Database {
         let mut db = Database {
             cameras: Vec::new(),
             lenses: Vec::new(),
+            mounts: Vec::new(),
         };
         for entry in DB_DIR.files() {
             let name = entry.path().to_string_lossy();
@@ -353,7 +546,7 @@ impl Database {
     ///
     /// ```
     /// let mut db = dioptric::Database::empty();
-    /// db.from_xml(r#"<lensdatabase version="2">
+    /// db.load_xml(r#"<lensdatabase version="2">
     ///   <camera>
     ///     <maker>Acme</maker><model>Acme X1</model>
     ///     <mount>M42</mount><cropfactor>1.5</cropfactor>
@@ -361,12 +554,17 @@ impl Database {
     /// </lensdatabase>"#).unwrap();
     /// assert!(db.find_camera("acme", "x1").is_some());
     /// ```
-    pub fn from_xml(&mut self, xml: &str) -> Result<()> {
+    pub fn load_xml(&mut self, xml: &str) -> Result<()> {
         self.ingest_xml(xml)
     }
 
     fn ingest_xml(&mut self, xml: &str) -> Result<()> {
         let raw: RawLensDatabase = quick_xml::de::from_str(xml)?;
+        for mount in raw.mounts {
+            if let Some(mount) = convert_mount(mount) {
+                self.mounts.push(mount);
+            }
+        }
         for c in raw.cameras {
             self.cameras.push(convert_camera(c));
         }
@@ -392,6 +590,7 @@ impl Database {
         Database {
             cameras: Vec::new(),
             lenses: Vec::new(),
+            mounts: Vec::new(),
         }
     }
 
@@ -403,6 +602,20 @@ impl Database {
     /// All lenses in the database.
     pub fn lenses(&self) -> &[Lens] {
         &self.lenses
+    }
+
+    /// All top-level mount compatibility records in the database.
+    pub fn mounts(&self) -> &[MountCompatibility] {
+        &self.mounts
+    }
+
+    /// Return whether a camera mount can accept a lens mount.
+    ///
+    /// Direct mount equality is accepted first. If the database contains a
+    /// top-level compatibility record for the camera mount, its `<compat>`
+    /// entries are also accepted.
+    pub fn mount_accepts_lens(&self, camera_mount: &str, lens_mount: &str) -> bool {
+        self.mount_match(camera_mount, lens_mount).is_some()
     }
 
     /// Find a camera by maker and model using case-insensitive substring matching.
@@ -439,6 +652,63 @@ impl Database {
         self.lenses.iter().find(|l| {
             fuzzy_contains(&l.maker, maker_query) && fuzzy_contains(&l.model, model_query)
         })
+    }
+
+    /// Find the best lens match for a specific camera.
+    ///
+    /// Candidate lenses are matched by maker and model like [`Self::find_lens`],
+    /// then filtered to lenses whose mount is compatible with the camera. When
+    /// the database has duplicate same-name lens entries, this ranks exact mount
+    /// matches ahead of entries with missing mount data, then prefers the lens
+    /// crop factor closest to the camera crop factor. Calibration coverage is
+    /// used as a final tie-breaker.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let db = dioptric::Database::bundled();
+    /// let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
+    /// let lens = db.find_lens_for_camera(
+    ///     camera,
+    ///     "Canon",
+    ///     "EF 24-70mm f/2.8L II USM",
+    /// );
+    /// assert!(lens.is_some());
+    /// ```
+    pub fn find_lens_for_camera(
+        &self,
+        camera: &Camera,
+        maker_query: &str,
+        model_query: &str,
+    ) -> Option<&Lens> {
+        self.find_lenses_for_camera(camera, maker_query, model_query)
+            .into_iter()
+            .next()
+            .map(|lens_match| lens_match.lens)
+    }
+
+    /// Find ranked lens matches for a specific camera.
+    ///
+    /// The returned matches are sorted in the same order used by
+    /// [`Self::find_lens_for_camera`]. Profiles calibrated for a smaller
+    /// sensor than the camera are excluded, matching Lensfun's lookup
+    /// semantics for full-frame bodies versus crop-only calibrations.
+    pub fn find_lenses_for_camera<'a>(
+        &'a self,
+        camera: &Camera,
+        maker_query: &str,
+        model_query: &str,
+    ) -> Vec<LensMatch<'a>> {
+        let mut matches: Vec<_> = self
+            .lenses
+            .iter()
+            .filter(|lens| {
+                fuzzy_contains(&lens.maker, maker_query) && fuzzy_contains(&lens.model, model_query)
+            })
+            .filter_map(|lens| self.lens_match_for_camera(lens, camera))
+            .collect();
+        matches.sort_by(compare_lens_matches);
+        matches
     }
 
     /// Find all cameras matching maker and model using case-insensitive
@@ -504,6 +774,39 @@ impl Database {
         })
     }
 
+    /// Find the best single-string lens match for a specific camera.
+    ///
+    /// This is the camera-aware variant of [`Self::find_lens_by_name`]. It is
+    /// useful when EXIF metadata provides a camera body plus a single
+    /// `LensModel` value without a separate lens maker field.
+    pub fn find_lens_by_name_for_camera(&self, camera: &Camera, query: &str) -> Option<&Lens> {
+        self.find_lenses_by_name_for_camera(camera, query)
+            .into_iter()
+            .next()
+            .map(|lens_match| lens_match.lens)
+    }
+
+    /// Find ranked camera-aware lens matches using a single query string.
+    ///
+    /// This is the ranked variant of [`Self::find_lens_by_name_for_camera`].
+    pub fn find_lenses_by_name_for_camera<'a>(
+        &'a self,
+        camera: &Camera,
+        query: &str,
+    ) -> Vec<LensMatch<'a>> {
+        let mut matches: Vec<_> = self
+            .lenses
+            .iter()
+            .filter(|lens| {
+                let full = format!("{} {}", lens.maker, lens.model);
+                fuzzy_contains(&full, query)
+            })
+            .filter_map(|lens| self.lens_match_for_camera(lens, camera))
+            .collect();
+        matches.sort_by(compare_lens_matches);
+        matches
+    }
+
     /// Find all lenses matching a single query string against the combined
     /// `"maker model"` text using case-insensitive substring matching, with a
     /// fallback that ignores punctuation and whitespace.
@@ -521,6 +824,52 @@ impl Database {
             fuzzy_contains(&full, query)
         })
     }
+
+    fn lens_match_for_camera<'a>(
+        &'a self,
+        lens: &'a Lens,
+        camera: &Camera,
+    ) -> Option<LensMatch<'a>> {
+        if !lens_crop_is_usable(lens, camera) {
+            return None;
+        }
+
+        let mount_match = if lens.mounts.is_empty() {
+            LensMountMatch::Unknown
+        } else {
+            lens.mounts
+                .iter()
+                .filter_map(|mount| self.mount_match(&camera.mount, mount))
+                .min()?
+        };
+
+        Some(LensMatch {
+            lens,
+            mount_match,
+            crop_factor_delta: lens
+                .crop_factor
+                .map(|crop_factor| (crop_factor - camera.crop_factor).abs()),
+            calibration_types: calibration_type_count(lens),
+            calibration_entries: calibration_entry_count(lens),
+        })
+    }
+
+    fn mount_match(&self, camera_mount: &str, lens_mount: &str) -> Option<LensMountMatch> {
+        if mount_matches(camera_mount, lens_mount) {
+            return Some(LensMountMatch::Exact);
+        }
+
+        self.mounts
+            .iter()
+            .find(|mount| mount_matches(&mount.mount, camera_mount))
+            .and_then(|mount| {
+                mount
+                    .compatible_mounts
+                    .iter()
+                    .any(|compatible| mount_matches(compatible, lens_mount))
+                    .then_some(LensMountMatch::Compatible)
+            })
+    }
 }
 
 // ── Interpolation helpers (pub(crate)) ────────────────────────────────────────
@@ -537,6 +886,42 @@ fn fuzzy_contains(haystack: &str, needle: &str) -> bool {
 
 fn normalise_search_text(value: &str) -> String {
     value.chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
+fn mount_matches(lens_mount: &str, camera_mount: &str) -> bool {
+    normalise_search_text(&lens_mount.to_lowercase())
+        == normalise_search_text(&camera_mount.to_lowercase())
+}
+
+fn lens_crop_is_usable(lens: &Lens, camera: &Camera) -> bool {
+    const EPSILON: f32 = 1e-4;
+    lens.crop_factor
+        .map(|crop_factor| crop_factor <= camera.crop_factor + EPSILON)
+        .unwrap_or(true)
+}
+
+fn compare_lens_matches(a: &LensMatch<'_>, b: &LensMatch<'_>) -> std::cmp::Ordering {
+    a.mount_match
+        .cmp(&b.mount_match)
+        .then_with(|| crop_delta_sort_key(*a).total_cmp(&crop_delta_sort_key(*b)))
+        .then_with(|| b.calibration_types.cmp(&a.calibration_types))
+        .then_with(|| b.calibration_entries.cmp(&a.calibration_entries))
+}
+
+fn crop_delta_sort_key(lens_match: LensMatch<'_>) -> f32 {
+    lens_match.crop_factor_delta.unwrap_or(f32::INFINITY)
+}
+
+fn calibration_type_count(lens: &Lens) -> usize {
+    usize::from(!lens.calibration.distortions.is_empty())
+        + usize::from(!lens.calibration.tcas.is_empty())
+        + usize::from(!lens.calibration.vignettings.is_empty())
+}
+
+fn calibration_entry_count(lens: &Lens) -> usize {
+    lens.calibration.distortions.len()
+        + lens.calibration.tcas.len()
+        + lens.calibration.vignettings.len()
 }
 
 /// Interpolate distortion parameters for the given focal length.
@@ -760,7 +1145,7 @@ mod tests {
   </lens>
 </lensdatabase>"#;
         let mut db = Database::empty();
-        db.from_xml(xml).expect("parse should succeed");
+        db.load_xml(xml).expect("parse should succeed");
         assert_eq!(db.cameras().len(), 1);
         assert_eq!(db.lenses().len(), 1);
     }
@@ -785,7 +1170,7 @@ mod tests {
 </lensdatabase>"#;
 
         let mut db = Database::empty();
-        db.from_xml(xml).expect("parse should succeed");
+        db.load_xml(xml).expect("parse should succeed");
         let lens = db.find_lens("Acme", "Zoom").expect("lens should load");
         assert_eq!(lens.calibration.distortions.len(), 2);
         assert_eq!(lens.calibration.tcas.len(), 2);
@@ -808,7 +1193,7 @@ mod tests {
 </lensdatabase>"#;
 
         let mut db = Database::empty();
-        db.from_xml(xml).expect("parse should succeed");
+        db.load_xml(xml).expect("parse should succeed");
         let lens = db.find_lens("Acme", "TCA").expect("lens should load");
 
         match lens.calibration.tcas[0].model {
@@ -843,7 +1228,7 @@ mod tests {
   </camera>
 </lensdatabase>"#;
         let mut db = Database::empty();
-        db.from_xml(xml).unwrap();
+        db.load_xml(xml).unwrap();
         assert!(db.find_camera("canon", "5d mark iii").is_some());
         assert!(db.find_camera("CANON", "EOS 5D").is_some());
         assert!(db.find_camera("nikon", "5d mark iii").is_none());
@@ -866,7 +1251,7 @@ mod tests {
   </lens>
 </lensdatabase>"#;
         let mut db = Database::empty();
-        db.from_xml(xml).unwrap();
+        db.load_xml(xml).unwrap();
 
         // Match against combined "maker model"
         assert!(db.find_lens_by_name("Canon EF 24-70").is_some());
@@ -887,6 +1272,145 @@ mod tests {
     }
 
     #[test]
+    fn find_lens_for_camera_prefers_matching_crop() {
+        let xml = r#"<lensdatabase version="2">
+  <camera>
+    <maker>Canon</maker>
+    <model>Canon Full Frame</model>
+    <mount>Canon EF</mount>
+    <cropfactor>1.0</cropfactor>
+  </camera>
+  <camera>
+    <maker>Canon</maker>
+    <model>Canon APS-C</model>
+    <mount>Canon EF</mount>
+    <cropfactor>1.6</cropfactor>
+  </camera>
+  <lens>
+    <maker>Canon</maker>
+    <model>Canon EF 35mm f/2 IS USM</model>
+    <mount>Canon EF</mount>
+    <cropfactor>1.6</cropfactor>
+    <calibration>
+      <vignetting model="pa" focal="35" aperture="2" distance="10" k1="-0.8" k2="0.2" k3="-0.1"/>
+    </calibration>
+  </lens>
+  <lens>
+    <maker>Canon</maker>
+    <model>Canon EF 35mm f/2 IS USM</model>
+    <mount>Canon EF</mount>
+    <cropfactor>1.0</cropfactor>
+    <calibration>
+      <distortion model="ptlens" focal="35" a="0.01" b="-0.03" c="0.02"/>
+      <tca model="linear" focal="35" kr="1.001" kb="0.999"/>
+    </calibration>
+  </lens>
+</lensdatabase>"#;
+        let mut db = Database::empty();
+        db.load_xml(xml).unwrap();
+
+        let full_frame = db.find_camera("Canon", "Full Frame").unwrap();
+        let aps_c = db.find_camera("Canon", "APS-C").unwrap();
+
+        let first = db.find_lens("Canon", "EF35mm f2").unwrap();
+        assert_eq!(first.crop_factor, Some(1.6));
+
+        let full_frame_lens = db
+            .find_lens_for_camera(full_frame, "Canon", "EF35mm f2")
+            .unwrap();
+        assert_eq!(full_frame_lens.crop_factor, Some(1.0));
+        assert_eq!(full_frame_lens.calibration.distortions.len(), 1);
+        assert_eq!(full_frame_lens.calibration.tcas.len(), 1);
+
+        let full_frame_matches = db.find_lenses_for_camera(full_frame, "Canon", "EF35mm f2");
+        assert_eq!(
+            full_frame_matches.len(),
+            1,
+            "full-frame lookup must reject crop-only calibrations"
+        );
+
+        let aps_c_lens = db
+            .find_lens_by_name_for_camera(aps_c, "Canon EF35mm f2")
+            .unwrap();
+        assert_eq!(aps_c_lens.crop_factor, Some(1.6));
+        assert_eq!(aps_c_lens.calibration.vignettings.len(), 1);
+    }
+
+    #[test]
+    fn find_lens_for_camera_filters_incompatible_mounts() {
+        let xml = r#"<lensdatabase version="2">
+  <camera>
+    <maker>Canon</maker>
+    <model>Canon Body</model>
+    <mount>Canon EF</mount>
+    <cropfactor>1.0</cropfactor>
+  </camera>
+  <lens>
+    <maker>Sigma</maker>
+    <model>Sigma 50mm f/1.4</model>
+    <mount>Nikon F</mount>
+    <cropfactor>1.0</cropfactor>
+  </lens>
+  <lens>
+    <maker>Sigma</maker>
+    <model>Sigma 50mm f/1.4</model>
+    <mount>Canon EF</mount>
+    <cropfactor>1.0</cropfactor>
+  </lens>
+</lensdatabase>"#;
+        let mut db = Database::empty();
+        db.load_xml(xml).unwrap();
+        let camera = db.find_camera("Canon", "Body").unwrap();
+
+        let first = db.find_lens("Sigma", "50mm").unwrap();
+        assert_eq!(first.mounts, vec!["Nikon F".to_owned()]);
+
+        let camera_lens = db.find_lens_for_camera(camera, "Sigma", "50mm").unwrap();
+        assert_eq!(camera_lens.mounts, vec!["Canon EF".to_owned()]);
+    }
+
+    #[test]
+    fn find_lenses_for_camera_uses_mount_compatibility_and_ranking() {
+        let xml = r#"<lensdatabase version="2">
+  <mount>
+    <name>Canon RF</name>
+    <compat>Canon EF</compat>
+  </mount>
+  <camera>
+    <maker>Canon</maker>
+    <model>Canon RF Body</model>
+    <mount>Canon RF</mount>
+    <cropfactor>1.0</cropfactor>
+  </camera>
+  <lens>
+    <maker>Canon</maker>
+    <model>Canon 50mm f/1.8</model>
+    <mount>Canon EF</mount>
+    <cropfactor>1.0</cropfactor>
+  </lens>
+  <lens>
+    <maker>Canon</maker>
+    <model>Canon 50mm f/1.8</model>
+    <mount>Canon RF</mount>
+    <cropfactor>1.0</cropfactor>
+  </lens>
+</lensdatabase>"#;
+        let mut db = Database::empty();
+        db.load_xml(xml).unwrap();
+        let camera = db.find_camera("Canon", "RF Body").unwrap();
+
+        assert!(db.mount_accepts_lens("Canon RF", "Canon EF"));
+        assert_eq!(db.mounts().len(), 1);
+
+        let matches = db.find_lenses_for_camera(camera, "Canon", "50mm");
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].mount_match, LensMountMatch::Exact);
+        assert_eq!(matches[0].lens.mounts, vec!["Canon RF".to_owned()]);
+        assert_eq!(matches[1].mount_match, LensMountMatch::Compatible);
+        assert_eq!(matches[1].lens.mounts, vec!["Canon EF".to_owned()]);
+    }
+
+    #[test]
     fn find_lenses_by_name_returns_multiple() {
         let xml = r#"<lensdatabase version="2">
   <lens>
@@ -903,7 +1427,7 @@ mod tests {
   </lens>
 </lensdatabase>"#;
         let mut db = Database::empty();
-        db.from_xml(xml).unwrap();
+        db.load_xml(xml).unwrap();
 
         let matches: Vec<_> = db.find_lenses_by_name("Canon EF").collect();
         assert_eq!(matches.len(), 2);

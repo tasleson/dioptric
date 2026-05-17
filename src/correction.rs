@@ -11,17 +11,242 @@
 #[cfg(feature = "image")]
 use image::{DynamicImage, RgbImage, RgbaImage};
 
-use crate::database::{Lens, interpolate_distortion, interpolate_tca, interpolate_vignetting};
+use crate::database::{
+    Camera, Lens, interpolate_distortion, interpolate_tca, interpolate_vignetting,
+};
 use crate::error::{Error, Result};
 use crate::models::{DistortionModel, TcaModel, VignettingParams, linear_to_srgb, srgb_to_linear};
+
+/// A source-image coordinate in pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Coordinate {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Per-channel source coordinates for subpixel corrections such as TCA.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SubpixelCoordinates {
+    pub red: Coordinate,
+    pub green: Coordinate,
+    pub blue: Coordinate,
+}
+
+/// Coordinate transform mode for map generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransformMode {
+    /// Rectify an image by mapping corrected output pixels to source pixels.
+    Rectify,
+    /// Prepare Lensfun's reverse transform.
+    Reverse,
+}
+
+/// Options for lower-level coordinate-map generation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CoordinateMapOptions {
+    transform_mode: TransformMode,
+    /// Geometry scale around the image centre. Values greater than `1.0`
+    /// reduce geometric displacement and can be used by callers that perform
+    /// their own canvas scaling.
+    scale: f32,
+}
+
+impl Default for CoordinateMapOptions {
+    fn default() -> Self {
+        Self {
+            transform_mode: TransformMode::Rectify,
+            scale: 1.0,
+        }
+    }
+}
+
+impl CoordinateMapOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Use the supplied coordinate transform mode.
+    pub fn with_transform_mode(mut self, transform_mode: TransformMode) -> Self {
+        self.transform_mode = transform_mode;
+        self
+    }
+
+    /// Match Lensfun's `reverse` modifier flag.
+    pub fn reverse(mut self, reverse: bool) -> Self {
+        self.transform_mode = if reverse {
+            TransformMode::Reverse
+        } else {
+            TransformMode::Rectify
+        };
+        self
+    }
+
+    /// Set the geometry scale around the image centre.
+    pub fn with_scale(mut self, scale: f32) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    /// Coordinate transform mode.
+    pub fn transform_mode(&self) -> TransformMode {
+        self.transform_mode
+    }
+
+    /// Geometry scale around the image centre.
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+}
+
+/// Correction stage ordering for [`CorrectionOptions`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineOrder {
+    /// Lensfun-style order: color correction first, then coordinate warps.
+    ColorFirst,
+    /// Legacy order used by the original `correct_all_*` helpers.
+    GeometryFirst,
+}
+
+/// Options for opt-in high-level correction methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorrectionOptions {
+    /// Apply distortion correction.
+    distortion: bool,
+    /// Apply transverse chromatic aberration correction.
+    tca: bool,
+    /// Apply vignetting correction.
+    vignetting: bool,
+    /// Stage order.
+    pipeline_order: PipelineOrder,
+}
+
+impl Default for CorrectionOptions {
+    fn default() -> Self {
+        Self {
+            distortion: true,
+            tca: true,
+            vignetting: true,
+            pipeline_order: PipelineOrder::ColorFirst,
+        }
+    }
+}
+
+impl CorrectionOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_distortion(mut self, enabled: bool) -> Self {
+        self.distortion = enabled;
+        self
+    }
+
+    pub fn with_tca(mut self, enabled: bool) -> Self {
+        self.tca = enabled;
+        self
+    }
+
+    pub fn with_vignetting(mut self, enabled: bool) -> Self {
+        self.vignetting = enabled;
+        self
+    }
+
+    pub fn with_pipeline_order(mut self, pipeline_order: PipelineOrder) -> Self {
+        self.pipeline_order = pipeline_order;
+        self
+    }
+
+    pub fn distortion_enabled(&self) -> bool {
+        self.distortion
+    }
+
+    pub fn tca_enabled(&self) -> bool {
+        self.tca
+    }
+
+    pub fn vignetting_enabled(&self) -> bool {
+        self.vignetting
+    }
+
+    pub fn pipeline_order(&self) -> PipelineOrder {
+        self.pipeline_order
+    }
+}
+
+/// Builder for [`CorrectionProfile`].
+#[derive(Debug, Clone, Copy)]
+pub struct CorrectionProfileBuilder<'a> {
+    lens: &'a Lens,
+    crop_factor: Option<f32>,
+    focal_length: Option<f32>,
+    aperture: Option<f32>,
+    distance: Option<f32>,
+}
+
+impl<'a> CorrectionProfileBuilder<'a> {
+    fn new(lens: &'a Lens) -> Self {
+        Self {
+            lens,
+            crop_factor: None,
+            focal_length: None,
+            aperture: None,
+            distance: None,
+        }
+    }
+
+    /// Set crop factor from a camera body.
+    pub fn camera(mut self, camera: &Camera) -> Self {
+        self.crop_factor = Some(camera.crop_factor());
+        self
+    }
+
+    /// Set sensor crop factor relative to 35 mm full frame.
+    pub fn crop_factor(mut self, crop_factor: f32) -> Self {
+        self.crop_factor = Some(crop_factor);
+        self
+    }
+
+    /// Set focal length in millimetres.
+    pub fn focal_length(mut self, focal_length: f32) -> Self {
+        self.focal_length = Some(focal_length);
+        self
+    }
+
+    /// Set aperture as an f-number.
+    pub fn aperture(mut self, aperture: f32) -> Self {
+        self.aperture = Some(aperture);
+        self
+    }
+
+    /// Set focus distance in metres.
+    pub fn distance(mut self, distance: f32) -> Self {
+        self.distance = Some(distance);
+        self
+    }
+
+    /// Build a correction profile.
+    pub fn build(self) -> Result<CorrectionProfile> {
+        CorrectionProfile::new(
+            self.lens,
+            self.crop_factor
+                .ok_or_else(|| missing_profile_parameter("crop_factor"))?,
+            self.focal_length
+                .ok_or_else(|| missing_profile_parameter("focal_length"))?,
+            self.aperture
+                .ok_or_else(|| missing_profile_parameter("aperture"))?,
+            self.distance
+                .ok_or_else(|| missing_profile_parameter("distance"))?,
+        )
+    }
+}
 
 // ── CorrectionProfile ─────────────────────────────────────────────────────────
 
 /// A resolved set of lens correction parameters for a single capture.
 ///
-/// Build one with [`CorrectionProfile::new`], then apply corrections using the
-/// `correct_*_raw` methods (always available) or the `correct_*` convenience
-/// methods (requires the `image` feature).
+/// Build one with [`CorrectionProfile::builder`], then apply corrections using
+/// the `correct_*_raw` methods (always available) or the `correct_*`
+/// convenience methods (requires the `image` feature).
 ///
 /// # Example
 ///
@@ -31,23 +256,52 @@ use crate::models::{DistortionModel, TcaModel, VignettingParams, linear_to_srgb,
 /// let db = Database::bundled();
 /// let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
 /// let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
-/// let profile = CorrectionProfile::new(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
+/// let profile = CorrectionProfile::builder(lens)
+///     .camera(camera)
+///     .focal_length(35.0)
+///     .aperture(4.0)
+///     .distance(10.0)
+///     .build()
+///     .unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct CorrectionProfile {
     /// Resolved distortion model (if calibration data is available).
-    pub distortion: Option<DistortionModel>,
+    pub(crate) distortion: Option<DistortionModel>,
     /// Resolved TCA model (if calibration data is available).
-    pub tca: Option<TcaModel>,
+    pub(crate) tca: Option<TcaModel>,
     /// Resolved vignetting parameters (if calibration data is available).
-    pub vignetting: Option<VignettingParams>,
+    pub(crate) vignetting: Option<VignettingParams>,
     /// Sensor crop factor, used to compute normalised coordinates.
     crop_factor: f32,
 }
 
 impl CorrectionProfile {
+    /// Start building a correction profile for a lens.
+    pub fn builder(lens: &Lens) -> CorrectionProfileBuilder<'_> {
+        CorrectionProfileBuilder::new(lens)
+    }
+
+    /// Resolved distortion model, if calibration data is available.
+    pub fn distortion(&self) -> Option<DistortionModel> {
+        self.distortion
+    }
+
+    /// Resolved transverse chromatic aberration model, if calibration data is available.
+    pub fn tca(&self) -> Option<TcaModel> {
+        self.tca
+    }
+
+    /// Resolved vignetting parameters, if calibration data is available.
+    pub fn vignetting(&self) -> Option<VignettingParams> {
+        self.vignetting
+    }
+
     /// Build a correction profile from a lens, camera crop factor, focal length,
     /// aperture (f-number), and focus distance (metres).
+    ///
+    /// This crate-internal constructor keeps validation in one place; public
+    /// callers should use [`Self::builder`].
     ///
     /// Returns [`Error::InvalidParameter`] if any of the numeric parameters
     /// are non-finite or non-positive.
@@ -60,10 +314,16 @@ impl CorrectionProfile {
     /// let db = Database::bundled();
     /// let lens = db.find_lens("Canon", "EF 24-70").unwrap();
     /// let camera = db.find_camera("Canon", "5D Mark III").unwrap();
-    /// let profile = CorrectionProfile::new(lens, camera.crop_factor(), 24.0, 2.8, 1000.0).unwrap();
-    /// assert!(profile.distortion.is_some());
+    /// let profile = CorrectionProfile::builder(lens)
+    ///     .camera(camera)
+    ///     .focal_length(24.0)
+    ///     .aperture(2.8)
+    ///     .distance(1000.0)
+    ///     .build()
+    ///     .unwrap();
+    /// assert!(profile.distortion().is_some());
     /// ```
-    pub fn new(
+    pub(crate) fn new(
         lens: &Lens,
         crop_factor: f32,
         focal: f32,
@@ -91,11 +351,11 @@ impl CorrectionProfile {
             )));
         }
 
-        let cal = &lens.calibration;
+        let cal = lens.calibration();
 
-        let distortion = interpolate_distortion(&cal.distortions, focal);
-        let tca = interpolate_tca(&cal.tcas, focal);
-        let vignetting = interpolate_vignetting(&cal.vignettings, focal, aperture, distance);
+        let distortion = interpolate_distortion(cal.distortions(), focal);
+        let tca = interpolate_tca(cal.tcas(), focal);
+        let vignetting = interpolate_vignetting(cal.vignettings(), focal, aperture, distance);
 
         Ok(Self {
             distortion,
@@ -320,6 +580,173 @@ impl CorrectionProfile {
         self.warp_tca_raw_f32(src, width, height, channels)
     }
 
+    // ── Higher-level option and coordinate-map APIs ─────────────────────
+
+    /// Apply selected corrections to raw `u8` pixel data using
+    /// [`CorrectionOptions`].
+    ///
+    /// This method is useful when callers need Lensfun-style color-first
+    /// ordering or want to disable individual stages without manually
+    /// sequencing the lower-level methods.
+    pub fn correct_with_options_raw(
+        &self,
+        width: u32,
+        height: u32,
+        channels: u32,
+        src: &[u8],
+        options: CorrectionOptions,
+    ) -> Result<Vec<u8>> {
+        validate_buffer(width, height, channels, src.len())?;
+        let mut current = src.to_vec();
+        match options.pipeline_order {
+            PipelineOrder::ColorFirst => {
+                if options.vignetting {
+                    self.correct_vignetting_raw_inplace(&mut current, width, height, channels);
+                }
+                if options.distortion {
+                    current = self.warp_distortion_raw(&current, width, height, channels)?;
+                }
+                if options.tca {
+                    current = self.warp_tca_raw(&current, width, height, channels)?;
+                }
+            }
+            PipelineOrder::GeometryFirst => {
+                if options.distortion {
+                    current = self.warp_distortion_raw(&current, width, height, channels)?;
+                }
+                if options.tca {
+                    current = self.warp_tca_raw(&current, width, height, channels)?;
+                }
+                if options.vignetting {
+                    self.correct_vignetting_raw_inplace(&mut current, width, height, channels);
+                }
+            }
+        }
+        Ok(current)
+    }
+
+    /// Apply selected corrections to linear `u16` pixel data using
+    /// [`CorrectionOptions`].
+    pub fn correct_with_options_raw_u16(
+        &self,
+        width: u32,
+        height: u32,
+        channels: u32,
+        src: &[u16],
+        options: CorrectionOptions,
+    ) -> Result<Vec<u16>> {
+        validate_buffer_u16(width, height, channels, src.len())?;
+        let mut current = src.to_vec();
+        match options.pipeline_order {
+            PipelineOrder::ColorFirst => {
+                if options.vignetting {
+                    self.correct_vignetting_raw_u16_inplace(&mut current, width, height, channels);
+                }
+                if options.distortion {
+                    current = self.warp_distortion_raw_u16(&current, width, height, channels)?;
+                }
+                if options.tca {
+                    current = self.warp_tca_raw_u16(&current, width, height, channels)?;
+                }
+            }
+            PipelineOrder::GeometryFirst => {
+                if options.distortion {
+                    current = self.warp_distortion_raw_u16(&current, width, height, channels)?;
+                }
+                if options.tca {
+                    current = self.warp_tca_raw_u16(&current, width, height, channels)?;
+                }
+                if options.vignetting {
+                    self.correct_vignetting_raw_u16_inplace(&mut current, width, height, channels);
+                }
+            }
+        }
+        Ok(current)
+    }
+
+    /// Apply selected corrections to linear `f32` pixel data using
+    /// [`CorrectionOptions`].
+    pub fn correct_with_options_raw_f32(
+        &self,
+        width: u32,
+        height: u32,
+        channels: u32,
+        src: &[f32],
+        options: CorrectionOptions,
+    ) -> Result<Vec<f32>> {
+        validate_buffer_f32(width, height, channels, src.len())?;
+        let mut current = src.to_vec();
+        match options.pipeline_order {
+            PipelineOrder::ColorFirst => {
+                if options.vignetting {
+                    self.correct_vignetting_raw_f32_inplace(&mut current, width, height, channels);
+                }
+                if options.distortion {
+                    current = self.warp_distortion_raw_f32(&current, width, height, channels)?;
+                }
+                if options.tca {
+                    current = self.warp_tca_raw_f32(&current, width, height, channels)?;
+                }
+            }
+            PipelineOrder::GeometryFirst => {
+                if options.distortion {
+                    current = self.warp_distortion_raw_f32(&current, width, height, channels)?;
+                }
+                if options.tca {
+                    current = self.warp_tca_raw_f32(&current, width, height, channels)?;
+                }
+                if options.vignetting {
+                    self.correct_vignetting_raw_f32_inplace(&mut current, width, height, channels);
+                }
+            }
+        }
+        Ok(current)
+    }
+
+    /// Build a distortion source-coordinate map for every output pixel.
+    pub fn distortion_coordinate_map(&self, width: u32, height: u32) -> Result<Vec<Coordinate>> {
+        self.distortion_coordinate_map_with_options(width, height, CoordinateMapOptions::default())
+    }
+
+    /// Build a distortion source-coordinate map with explicit map options.
+    pub fn distortion_coordinate_map_with_options(
+        &self,
+        width: u32,
+        height: u32,
+        options: CoordinateMapOptions,
+    ) -> Result<Vec<Coordinate>> {
+        validate_map_options(width, height, options)?;
+        let mut map = Vec::with_capacity(width as usize * height as usize);
+        for y in 0..height {
+            for x in 0..width {
+                map.push(self.distortion_source_coordinate(width, height, x, y, options));
+            }
+        }
+        Ok(map)
+    }
+
+    /// Build a TCA source-coordinate map for every output pixel.
+    pub fn tca_coordinate_map(&self, width: u32, height: u32) -> Result<Vec<SubpixelCoordinates>> {
+        self.tca_coordinate_map_with_options(width, height, CoordinateMapOptions::default())
+    }
+
+    /// Build a TCA source-coordinate map with explicit map options.
+    pub fn tca_coordinate_map_with_options(
+        &self,
+        width: u32,
+        height: u32,
+        options: CoordinateMapOptions,
+    ) -> Result<Vec<SubpixelCoordinates>> {
+        validate_map_options(width, height, options)?;
+        let mut map = Vec::with_capacity(width as usize * height as usize);
+        for y in 0..height {
+            for x in 0..width {
+                map.push(self.tca_source_coordinates(width, height, x, y, options));
+            }
+        }
+        Ok(map)
+    }
+
     // ── DynamicImage convenience API (requires "image" feature) ─────────
 
     /// Apply distortion, TCA, and vignetting corrections in sequence.
@@ -369,6 +796,89 @@ impl CorrectionProfile {
     }
 
     // ── internal helpers ────────────────────────────────────────────────
+
+    fn distortion_source_coordinate(
+        &self,
+        w: u32,
+        h: u32,
+        px: u32,
+        py: u32,
+        options: CoordinateMapOptions,
+    ) -> Coordinate {
+        let model = match self.distortion {
+            Some(model) => model,
+            None => {
+                return Coordinate {
+                    x: px as f32,
+                    y: py as f32,
+                };
+            }
+        };
+
+        let (wf, hf) = (w as f32, h as f32);
+        let norm = normalisation_factor(wf, hf, self.crop_factor) * options.scale;
+        let cx = wf * 0.5;
+        let cy = hf * 0.5;
+        let xn = (px as f32 - cx) / norm;
+        let yn = (py as f32 - cy) / norm;
+        let r = (xn * xn + yn * yn).sqrt();
+        let mapped_r = match options.transform_mode {
+            TransformMode::Rectify => model.undistorted_to_distorted(r),
+            TransformMode::Reverse => invert_distortion_radius(model, r),
+        };
+        let radial_scale = if r > 1e-8 { mapped_r / r } else { 1.0 };
+
+        Coordinate {
+            x: xn * radial_scale * norm + cx,
+            y: yn * radial_scale * norm + cy,
+        }
+    }
+
+    fn tca_source_coordinates(
+        &self,
+        w: u32,
+        h: u32,
+        px: u32,
+        py: u32,
+        options: CoordinateMapOptions,
+    ) -> SubpixelCoordinates {
+        let base = Coordinate {
+            x: px as f32,
+            y: py as f32,
+        };
+        let tca = match self.tca {
+            Some(tca) => tca,
+            None => {
+                return SubpixelCoordinates {
+                    red: base,
+                    green: base,
+                    blue: base,
+                };
+            }
+        };
+
+        let (wf, hf) = (w as f32, h as f32);
+        let norm = normalisation_factor(wf, hf, self.crop_factor) * options.scale;
+        let cx = wf * 0.5;
+        let cy = hf * 0.5;
+        let xn = (px as f32 - cx) / norm;
+        let yn = (py as f32 - cy) / norm;
+        let r = (xn * xn + yn * yn).sqrt();
+        let red_scale = tca_channel_scale(tca, r, Channel::Red, options.transform_mode);
+        let blue_scale = tca_channel_scale(tca, r, Channel::Blue, options.transform_mode);
+
+        SubpixelCoordinates {
+            red: Coordinate {
+                x: xn * red_scale * norm + cx,
+                y: yn * red_scale * norm + cy,
+            },
+            green: base,
+            blue: Coordinate {
+                x: xn * blue_scale * norm + cx,
+                y: yn * blue_scale * norm + cy,
+            },
+        }
+    }
 
     fn warp_distortion_raw_u16(&self, src: &[u16], w: u32, h: u32, ch: u32) -> Result<Vec<u16>> {
         let model = match self.distortion {
@@ -783,6 +1293,25 @@ fn validate_buffer(width: u32, height: u32, channels: u32, len: usize) -> Result
     Ok(())
 }
 
+fn missing_profile_parameter(name: &str) -> Error {
+    Error::InvalidParameter(format!("missing correction profile parameter: {name}"))
+}
+
+fn validate_map_options(width: u32, height: u32, options: CoordinateMapOptions) -> Result<()> {
+    if width == 0 || height == 0 {
+        return Err(Error::InvalidParameter(format!(
+            "coordinate map dimensions must be non-zero, got {width}x{height}"
+        )));
+    }
+    if !options.scale.is_finite() || options.scale <= 0.0 {
+        return Err(Error::InvalidParameter(format!(
+            "coordinate map scale {} is invalid",
+            options.scale
+        )));
+    }
+    Ok(())
+}
+
 // ── DynamicImage bridge (requires "image" feature) ───────────────────────────
 
 #[cfg(feature = "image")]
@@ -823,6 +1352,74 @@ fn unsupported_image_format(img: &DynamicImage) -> Error {
 #[inline]
 fn normalisation_factor(w: f32, h: f32, crop_factor: f32) -> f32 {
     (w * w + h * h).sqrt() * 0.5 / crop_factor
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Channel {
+    Red,
+    Blue,
+}
+
+fn tca_channel_scale(
+    tca: TcaModel,
+    r: f32,
+    channel: Channel,
+    transform_mode: TransformMode,
+) -> f32 {
+    match transform_mode {
+        TransformMode::Rectify => {
+            let (red, blue) = tca.channel_radii(r);
+            match channel {
+                Channel::Red => red,
+                Channel::Blue => blue,
+            }
+        }
+        TransformMode::Reverse => {
+            if r <= 1e-8 {
+                return 1.0;
+            }
+            let mapped = invert_tca_radius(tca, r, channel);
+            mapped / r
+        }
+    }
+}
+
+fn invert_distortion_radius(model: DistortionModel, target: f32) -> f32 {
+    invert_radius(target, |radius| model.undistorted_to_distorted(radius))
+}
+
+fn invert_tca_radius(tca: TcaModel, target: f32, channel: Channel) -> f32 {
+    invert_radius(target, |radius| match (tca, channel) {
+        (TcaModel::Linear(params), Channel::Red) => radius * params.kr,
+        (TcaModel::Linear(params), Channel::Blue) => radius * params.kb,
+        (TcaModel::Poly3(params), Channel::Red) => params.red(radius),
+        (TcaModel::Poly3(params), Channel::Blue) => params.blue(radius),
+    })
+}
+
+fn invert_radius(target: f32, f: impl Fn(f32) -> f32) -> f32 {
+    if target <= 0.0 {
+        return 0.0;
+    }
+
+    let mut lo = 0.0;
+    let mut hi = target.max(1.0);
+    for _ in 0..16 {
+        if f(hi) >= target {
+            break;
+        }
+        hi *= 2.0;
+    }
+
+    for _ in 0..32 {
+        let mid = (lo + hi) * 0.5;
+        if f(mid) < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    (lo + hi) * 0.5
 }
 
 // ── Bilinear interpolation on raw slices ─────────────────────────────────────
@@ -1504,6 +2101,111 @@ mod tests {
                 data[i], i
             );
         }
+    }
+
+    #[test]
+    fn coordinate_maps_expose_geometry_without_resampling() {
+        use crate::database::{Calibration, DistortionEntry, Lens, TcaEntry};
+        use crate::models::{Poly3Params, TcaLinearParams};
+
+        let lens = Lens {
+            maker: "Test".into(),
+            model: "Coordinate maps".into(),
+            mounts: vec![],
+            crop_factor: Some(1.0),
+            calibration: Calibration {
+                distortions: vec![DistortionEntry {
+                    focal: 35.0,
+                    model: DistortionModel::Poly3(Poly3Params { k1: 0.2 }),
+                }],
+                tcas: vec![TcaEntry {
+                    focal: 35.0,
+                    model: TcaModel::Linear(TcaLinearParams { kr: 1.1, kb: 0.9 }),
+                }],
+                vignettings: vec![],
+            },
+        };
+        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 4.0, 10.0).unwrap();
+
+        let distortion = profile.distortion_coordinate_map(8, 8).unwrap();
+        assert_eq!(distortion.len(), 64);
+        let off_corner = distortion[9];
+        assert!(
+            (1.20..1.35).contains(&off_corner.x),
+            "distortion map should expose inward source x, got {}",
+            off_corner.x
+        );
+        assert!(
+            (1.20..1.35).contains(&off_corner.y),
+            "distortion map should expose inward source y, got {}",
+            off_corner.y
+        );
+
+        let tca = profile.tca_coordinate_map(8, 8).unwrap();
+        assert_eq!(tca.len(), 64);
+        let off_corner = tca[9];
+        assert!(off_corner.red.x < off_corner.green.x);
+        assert!(off_corner.blue.x > off_corner.green.x);
+
+        let reverse = profile
+            .distortion_coordinate_map_with_options(
+                8,
+                8,
+                CoordinateMapOptions::new().with_transform_mode(TransformMode::Reverse),
+            )
+            .unwrap();
+        assert!(
+            reverse[9].x < 1.0,
+            "reverse distortion map should move the sample outward"
+        );
+    }
+
+    #[test]
+    fn correction_options_can_disable_stages() {
+        use crate::database::{Calibration, Lens, VignettingEntry};
+        use crate::models::VignettingParams;
+
+        let lens = Lens {
+            maker: "Test".into(),
+            model: "Options".into(),
+            mounts: vec![],
+            crop_factor: Some(1.0),
+            calibration: Calibration {
+                distortions: vec![],
+                tcas: vec![],
+                vignettings: vec![VignettingEntry {
+                    focal: 35.0,
+                    aperture: 2.0,
+                    distance: 1000.0,
+                    params: VignettingParams {
+                        k1: -0.5,
+                        k2: 0.1,
+                        k3: -0.05,
+                    },
+                }],
+            },
+        };
+        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
+        let src = vec![0.75f32; 16 * 16 * 3];
+
+        let disabled = profile
+            .correct_with_options_raw_f32(
+                16,
+                16,
+                3,
+                &src,
+                CorrectionOptions::new().with_vignetting(false),
+            )
+            .unwrap();
+        assert_eq!(disabled, src);
+
+        let enabled = profile
+            .correct_with_options_raw_f32(16, 16, 3, &src, CorrectionOptions::new())
+            .unwrap();
+        assert!(
+            enabled[0] > src[0],
+            "enabled vignetting stage should brighten the corner"
+        );
     }
 
     #[cfg(feature = "image")]

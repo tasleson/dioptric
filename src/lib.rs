@@ -10,18 +10,21 @@
 //!
 //! let db = Database::bundled();
 //!
-//! let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM")
-//!     .expect("lens not found");
 //! let camera = db.find_camera("Canon", "EOS 5D Mark III")
 //!     .expect("camera not found");
+//! let lens = db.find_lens_for_camera(
+//!     camera,
+//!     "Canon",
+//!     "EF 24-70mm f/2.8L II USM",
+//! ).expect("lens not found");
 //!
-//! let profile = CorrectionProfile::new(
-//!     lens,
-//!     camera.crop_factor(),
-//!     35.0,   // focal length in mm
-//!     4.0,    // aperture f-number
-//!     10.0,   // focus distance in metres
-//! ).expect("failed to build profile");
+//! let profile = CorrectionProfile::builder(lens)
+//!     .camera(camera)
+//!     .focal_length(35.0) // mm
+//!     .aperture(4.0)     // f-number
+//!     .distance(10.0)    // metres
+//!     .build()
+//!     .expect("failed to build profile");
 //!
 //! // Apply corrections to a DynamicImage:
 //! // let corrected = profile.correct_all(&img).unwrap();
@@ -72,13 +75,25 @@
 //!
 //! Both APIs support 3-channel (RGB) and 4-channel (RGBA) data. `Rgba` inputs
 //! preserve alpha; unsupported formats return [`Error::UnsupportedImageFormat`].
+//! Raw-processor integrations can use
+//! [`CorrectionProfile::distortion_coordinate_map`] and
+//! [`CorrectionProfile::tca_coordinate_map`] to feed their own resampling
+//! pipeline, or [`CorrectionOptions`] with `correct_with_options_raw*` methods
+//! to choose stages and Lensfun-style color-first ordering.
+//! [`CoordinateMapOptions::reverse`] matches Lensfun's reverse-transform flag.
 //!
 //! ## Database lookup
 //!
 //! [`Database::find_camera`] and [`Database::find_lens`] return the first
 //! match; [`Database::find_cameras`] and [`Database::find_lenses`] return
-//! iterators over all matches.  All four perform case-insensitive substring
-//! matching, so EXIF strings rarely need to match exactly.
+//! iterators over all matches. [`Database::find_lens_for_camera`] and
+//! [`Database::find_lens_by_name_for_camera`] use camera mount and crop factor
+//! to rank duplicate lens profiles.
+//! [`Database::find_lenses_for_camera`] and
+//! [`Database::find_lenses_by_name_for_camera`] expose those ranked
+//! alternatives for ambiguous UI workflows.
+//! All lookup methods perform case-insensitive substring matching, so EXIF
+//! strings rarely need to match exactly.
 //!
 //! [`Database::find_lens_by_name`] and [`Database::find_lenses_by_name`]
 //! accept a single query string matched against the combined `"maker model"`
@@ -90,6 +105,9 @@ pub mod database;
 pub mod error;
 pub mod models;
 
-pub use correction::CorrectionProfile;
-pub use database::Database;
+pub use correction::{
+    Coordinate, CoordinateMapOptions, CorrectionOptions, CorrectionProfile,
+    CorrectionProfileBuilder, PipelineOrder, SubpixelCoordinates, TransformMode,
+};
+pub use database::{Database, LensMatch, LensMountMatch, MountCompatibility};
 pub use error::{Error, Result};

@@ -1,5 +1,20 @@
 use dioptric::{CorrectionProfile, Database};
 
+fn profile_for(
+    lens: &dioptric::database::Lens,
+    crop_factor: f32,
+    focal_length: f32,
+    aperture: f32,
+    distance: f32,
+) -> dioptric::Result<CorrectionProfile> {
+    CorrectionProfile::builder(lens)
+        .crop_factor(crop_factor)
+        .focal_length(focal_length)
+        .aperture(aperture)
+        .distance(distance)
+        .build()
+}
+
 // ── Database loading ───────────────────────────────────────────────────────────
 
 #[test]
@@ -48,9 +63,9 @@ fn find_missing_camera_returns_none() {
 }
 
 #[test]
-fn from_xml_public_api_returns_parse_error_for_invalid_xml() {
+fn load_xml_public_api_returns_parse_error_for_invalid_xml() {
     let mut db = Database::empty();
-    let err = db.from_xml("<lensdatabase><camera>").unwrap_err();
+    let err = db.load_xml("<lensdatabase><camera>").unwrap_err();
 
     assert!(matches!(err, dioptric::Error::XmlParse(_)));
     assert_eq!(db.cameras().len(), 0);
@@ -64,16 +79,36 @@ fn profile_for_known_lens() {
     let db = Database::bundled();
     let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
     let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
-    let profile = CorrectionProfile::new(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
+    let profile = CorrectionProfile::builder(lens)
+        .camera(camera)
+        .focal_length(35.0)
+        .aperture(4.0)
+        .distance(10.0)
+        .build()
+        .unwrap();
     // This lens has distortion calibration
-    assert!(profile.distortion.is_some(), "expected distortion data");
+    assert!(profile.distortion().is_some(), "expected distortion data");
+}
+
+#[test]
+fn profile_builder_reports_missing_parameters() {
+    let db = Database::bundled();
+    let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
+    let err = CorrectionProfile::builder(lens)
+        .focal_length(35.0)
+        .aperture(4.0)
+        .distance(10.0)
+        .build()
+        .unwrap_err();
+
+    assert!(matches!(err, dioptric::Error::InvalidParameter(_)));
 }
 
 #[test]
 fn profile_invalid_focal_returns_error() {
     let db = Database::bundled();
     let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
-    let result = CorrectionProfile::new(lens, 1.0, -10.0, 4.0, 10.0);
+    let result = profile_for(lens, 1.0, -10.0, 4.0, 10.0);
     assert!(result.is_err());
 }
 
@@ -81,7 +116,7 @@ fn profile_invalid_focal_returns_error() {
 fn profile_invalid_aperture_returns_error() {
     let db = Database::bundled();
     let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
-    let result = CorrectionProfile::new(lens, 1.0, 35.0, 0.0, 10.0);
+    let result = profile_for(lens, 1.0, 35.0, 0.0, 10.0);
     assert!(result.is_err());
 }
 
@@ -90,15 +125,15 @@ fn profile_uses_focus_distance_for_vignetting() {
     use dioptric::database::{Calibration, Lens, VignettingEntry};
     use dioptric::models::VignettingParams;
 
-    let lens = Lens {
-        maker: "Test".into(),
-        model: "Distance-sensitive vignette".into(),
-        mounts: vec![],
-        crop_factor: Some(1.0),
-        calibration: Calibration {
-            distortions: vec![],
-            tcas: vec![],
-            vignettings: vec![
+    let lens = Lens::new(
+        "Test",
+        "Distance-sensitive vignette",
+        vec![],
+        Some(1.0),
+        Calibration::new(
+            vec![],
+            vec![],
+            vec![
                 VignettingEntry {
                     focal: 35.0,
                     aperture: 2.0,
@@ -120,17 +155,17 @@ fn profile_uses_focus_distance_for_vignetting() {
                     },
                 },
             ],
-        },
-    };
+        ),
+    );
 
-    let near = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 1.0).unwrap();
-    let far = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
-    let mid = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 5.5).unwrap();
+    let near = profile_for(&lens, 1.0, 35.0, 2.0, 1.0).unwrap();
+    let far = profile_for(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
+    let mid = profile_for(&lens, 1.0, 35.0, 2.0, 5.5).unwrap();
 
-    assert_ne!(near.vignetting, far.vignetting);
-    assert_eq!(near.vignetting.unwrap().k1, -0.1);
-    assert_eq!(far.vignetting.unwrap().k1, -0.4);
-    assert!((mid.vignetting.unwrap().k1 + 0.25).abs() < 1e-6);
+    assert_ne!(near.vignetting(), far.vignetting());
+    assert_eq!(near.vignetting().unwrap().k1, -0.1);
+    assert_eq!(far.vignetting().unwrap().k1, -0.4);
+    assert!((mid.vignetting().unwrap().k1 + 0.25).abs() < 1e-6);
 }
 
 // ── Rasterlab-shaped raw-buffer integration ─────────────────────────────────
@@ -194,17 +229,20 @@ fn rasterlab_image_round_trip_uses_linear_raw_buffer_without_extra_pixel_copy() 
         .find_camera(&input.metadata.camera_make, &input.metadata.camera_model)
         .unwrap();
     let lens = match input.metadata.lens_make.as_deref() {
-        Some(lens_make) => db.find_lens(lens_make, &input.metadata.lens_model).unwrap(),
-        None => db.find_lens_by_name(&input.metadata.lens_model).unwrap(),
+        Some(lens_make) => db
+            .find_lens_for_camera(camera, lens_make, &input.metadata.lens_model)
+            .unwrap(),
+        None => db
+            .find_lens_by_name_for_camera(camera, &input.metadata.lens_model)
+            .unwrap(),
     };
-    let profile = CorrectionProfile::new(
-        lens,
-        camera.crop_factor(),
-        input.metadata.focal_length_mm,
-        input.metadata.aperture,
-        input.metadata.subject_distance_m.unwrap_or(1000.0),
-    )
-    .unwrap();
+    let profile = CorrectionProfile::builder(lens)
+        .camera(camera)
+        .focal_length(input.metadata.focal_length_mm)
+        .aperture(input.metadata.aperture)
+        .distance(input.metadata.subject_distance_m.unwrap_or(1000.0))
+        .build()
+        .unwrap();
 
     let corrected_pixels = profile
         .correct_all_raw_f32(input.width, input.height, input.channels, &input.pixels)
@@ -229,23 +267,23 @@ fn poly5_distortion_pipeline_warps_raw_f32_pixels() {
     use dioptric::database::{Calibration, DistortionEntry, Lens};
     use dioptric::models::{DistortionModel, Poly5Params};
 
-    let lens = Lens {
-        maker: "Test".into(),
-        model: "Poly5 pipeline".into(),
-        mounts: vec![],
-        crop_factor: Some(1.0),
-        calibration: Calibration {
-            distortions: vec![DistortionEntry {
+    let lens = Lens::new(
+        "Test",
+        "Poly5 pipeline",
+        vec![],
+        Some(1.0),
+        Calibration::new(
+            vec![DistortionEntry {
                 focal: 35.0,
                 model: DistortionModel::Poly5(Poly5Params { k1: -0.2, k2: 0.04 }),
             }],
-            tcas: vec![],
-            vignettings: vec![],
-        },
-    };
-    let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 4.0, 10.0).unwrap();
+            vec![],
+            vec![],
+        ),
+    );
+    let profile = profile_for(&lens, 1.0, 35.0, 4.0, 10.0).unwrap();
     assert!(matches!(
-        profile.distortion,
+        profile.distortion(),
         Some(DistortionModel::Poly5(_))
     ));
 
@@ -284,13 +322,13 @@ fn ptlens_distortion_pipeline_warps_raw_f32_pixels() {
     use dioptric::database::{Calibration, DistortionEntry, Lens};
     use dioptric::models::{DistortionModel, PtLensParams};
 
-    let lens = Lens {
-        maker: "Test".into(),
-        model: "PtLens pipeline".into(),
-        mounts: vec![],
-        crop_factor: Some(1.0),
-        calibration: Calibration {
-            distortions: vec![DistortionEntry {
+    let lens = Lens::new(
+        "Test",
+        "PtLens pipeline",
+        vec![],
+        Some(1.0),
+        Calibration::new(
+            vec![DistortionEntry {
                 focal: 35.0,
                 model: DistortionModel::PtLens(PtLensParams {
                     a: 0.0,
@@ -298,13 +336,13 @@ fn ptlens_distortion_pipeline_warps_raw_f32_pixels() {
                     c: 0.0,
                 }),
             }],
-            tcas: vec![],
-            vignettings: vec![],
-        },
-    };
-    let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 4.0, 10.0).unwrap();
+            vec![],
+            vec![],
+        ),
+    );
+    let profile = profile_for(&lens, 1.0, 35.0, 4.0, 10.0).unwrap();
     assert!(matches!(
-        profile.distortion,
+        profile.distortion(),
         Some(DistortionModel::PtLens(_))
     ));
 
@@ -344,14 +382,14 @@ fn tca_poly3_pipeline_warps_red_and_blue_raw_f32_channels() {
     use dioptric::database::{Calibration, Lens, TcaEntry};
     use dioptric::models::{TcaModel, TcaPoly3Params};
 
-    let lens = Lens {
-        maker: "Test".into(),
-        model: "TCA Poly3 pipeline".into(),
-        mounts: vec![],
-        crop_factor: Some(1.0),
-        calibration: Calibration {
-            distortions: vec![],
-            tcas: vec![TcaEntry {
+    let lens = Lens::new(
+        "Test",
+        "TCA Poly3 pipeline",
+        vec![],
+        Some(1.0),
+        Calibration::new(
+            vec![],
+            vec![TcaEntry {
                 focal: 35.0,
                 model: TcaModel::Poly3(TcaPoly3Params {
                     vr: 1.0,
@@ -362,11 +400,11 @@ fn tca_poly3_pipeline_warps_red_and_blue_raw_f32_channels() {
                     bb: -0.2,
                 }),
             }],
-            vignettings: vec![],
-        },
-    };
-    let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 4.0, 10.0).unwrap();
-    assert!(matches!(profile.tca, Some(TcaModel::Poly3(_))));
+            vec![],
+        ),
+    );
+    let profile = profile_for(&lens, 1.0, 35.0, 4.0, 10.0).unwrap();
+    assert!(matches!(profile.tca(), Some(TcaModel::Poly3(_))));
 
     let (width, height, channels) = (8u32, 8u32, 3u32);
     let src: Vec<f32> = (0..height)
@@ -400,21 +438,21 @@ fn barrel_distortion_moves_off_corner_sample_inward() {
     use dioptric::database::{Calibration, DistortionEntry, Lens};
     use dioptric::models::{DistortionModel, Poly3Params};
 
-    let lens = Lens {
-        maker: "Test".into(),
-        model: "Barrel warp".into(),
-        mounts: vec![],
-        crop_factor: Some(1.0),
-        calibration: Calibration {
-            distortions: vec![DistortionEntry {
+    let lens = Lens::new(
+        "Test",
+        "Barrel warp",
+        vec![],
+        Some(1.0),
+        Calibration::new(
+            vec![DistortionEntry {
                 focal: 35.0,
                 model: DistortionModel::Poly3(Poly3Params { k1: 0.2 }),
             }],
-            tcas: vec![],
-            vignettings: vec![],
-        },
-    };
-    let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 4.0, 10.0).unwrap();
+            vec![],
+            vec![],
+        ),
+    );
+    let profile = profile_for(&lens, 1.0, 35.0, 4.0, 10.0).unwrap();
 
     let (width, height, channels) = (8u32, 8u32, 3u32);
     let src: Vec<f32> = (0..height)
@@ -460,7 +498,7 @@ mod image_tests {
         let db = Database::bundled();
         let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
         let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
-        let profile = CorrectionProfile::new(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
+        let profile = profile_for(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
 
         let img = test_image(64, 48, [180, 120, 80]);
         let corrected = profile.correct_all(&img).unwrap();
@@ -472,7 +510,7 @@ mod image_tests {
         let db = Database::bundled();
         let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
         let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
-        let profile = CorrectionProfile::new(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
+        let profile = profile_for(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
 
         let img = test_image(64, 48, [128, 64, 32]);
         let result = profile.correct_distortion(&img).unwrap();
@@ -484,7 +522,7 @@ mod image_tests {
         let db = Database::bundled();
         let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
         let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
-        let profile = CorrectionProfile::new(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
+        let profile = profile_for(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
 
         let img = test_image(64, 48, [200, 150, 100]);
         let result = profile.correct_tca(&img).unwrap();
@@ -496,9 +534,9 @@ mod image_tests {
         let db = Database::bundled();
         let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
         let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
-        let profile = CorrectionProfile::new(lens, camera.crop_factor(), 24.0, 2.8, 10.0).unwrap();
+        let profile = profile_for(lens, camera.crop_factor(), 24.0, 2.8, 10.0).unwrap();
 
-        if profile.vignetting.is_none() {
+        if profile.vignetting().is_none() {
             return;
         }
 
@@ -524,7 +562,7 @@ mod image_tests {
         let db = Database::bundled();
         let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
         let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
-        let profile = CorrectionProfile::new(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
+        let profile = profile_for(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
 
         let img = DynamicImage::ImageRgba8(RgbaImage::from_pixel(32, 24, Rgba([10, 20, 30, 77])));
         let corrected = profile.correct_all(&img).unwrap().to_rgba8();
@@ -537,7 +575,7 @@ mod image_tests {
         let db = Database::bundled();
         let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
         let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
-        let profile = CorrectionProfile::new(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
+        let profile = profile_for(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
 
         let img =
             DynamicImage::ImageLuma8(image::GrayImage::from_pixel(16, 16, image::Luma([128])));
@@ -550,22 +588,22 @@ mod image_tests {
         use dioptric::database::{Calibration, DistortionEntry, Lens};
         use dioptric::models::{DistortionModel, Poly3Params};
 
-        let lens = Lens {
-            maker: "Test".into(),
-            model: "Identity".into(),
-            mounts: vec![],
-            crop_factor: Some(1.0),
-            calibration: Calibration {
-                distortions: vec![DistortionEntry {
+        let lens = Lens::new(
+            "Test",
+            "Identity",
+            vec![],
+            Some(1.0),
+            Calibration::new(
+                vec![DistortionEntry {
                     focal: 50.0,
                     model: DistortionModel::Poly3(Poly3Params { k1: 0.0 }),
                 }],
-                tcas: vec![],
-                vignettings: vec![],
-            },
-        };
+                vec![],
+                vec![],
+            ),
+        );
 
-        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
+        let profile = profile_for(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
         let img = test_image(32, 32, [100, 150, 200]);
         let result = profile.correct_distortion(&img).unwrap();
 
@@ -591,25 +629,25 @@ mod image_tests {
         use dioptric::database::{Calibration, DistortionEntry, Lens, TcaEntry};
         use dioptric::models::{DistortionModel, Poly3Params, TcaLinearParams, TcaModel};
 
-        let lens = Lens {
-            maker: "Test".into(),
-            model: "TCA test".into(),
-            mounts: vec![],
-            crop_factor: Some(1.0),
-            calibration: Calibration {
-                distortions: vec![DistortionEntry {
+        let lens = Lens::new(
+            "Test",
+            "TCA test",
+            vec![],
+            Some(1.0),
+            Calibration::new(
+                vec![DistortionEntry {
                     focal: 50.0,
                     model: DistortionModel::Poly3(Poly3Params { k1: 0.0 }),
                 }],
-                tcas: vec![TcaEntry {
+                vec![TcaEntry {
                     focal: 50.0,
                     model: TcaModel::Linear(TcaLinearParams { kr: 1.05, kb: 0.95 }),
                 }],
-                vignettings: vec![],
-            },
-        };
+                vec![],
+            ),
+        );
 
-        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
+        let profile = profile_for(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
 
         let img = test_image(64, 64, [200, 150, 100]);
         let dist_only = profile.correct_distortion(&img).unwrap().to_rgb8();
