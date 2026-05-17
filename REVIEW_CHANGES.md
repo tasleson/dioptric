@@ -27,7 +27,7 @@ rasterlab.
 
 ## Rasterlab compatibility
 
-- [ ] Add `lens_make` field to rasterlab `ImageMetadata` (EXIF tag `0xa433`
+- [x] Add `lens_make` field to rasterlab `ImageMetadata` (EXIF tag `0xa433`
       / `LensMake`)
 - [ ] Add focus/subject distance to rasterlab `ImageMetadata` (EXIF tag
       `0x9206` / `SubjectDistance`)
