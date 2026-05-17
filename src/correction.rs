@@ -93,18 +93,9 @@ impl CorrectionProfile {
 
         let cal = &lens.calibration;
 
-        let mut dist_entries = cal.distortions.clone();
-        dist_entries.sort_by(|a, b| a.focal.total_cmp(&b.focal));
-
-        let mut tca_entries = cal.tcas.clone();
-        tca_entries.sort_by(|a, b| a.focal.total_cmp(&b.focal));
-
-        let mut vig_entries = cal.vignettings.clone();
-        vig_entries.sort_by(|a, b| a.focal.total_cmp(&b.focal));
-
-        let distortion = interpolate_distortion(&dist_entries, focal);
-        let tca = interpolate_tca(&tca_entries, focal);
-        let vignetting = interpolate_vignetting(&vig_entries, focal, aperture, distance);
+        let distortion = interpolate_distortion(&cal.distortions, focal);
+        let tca = interpolate_tca(&cal.tcas, focal);
+        let vignetting = interpolate_vignetting(&cal.vignettings, focal, aperture, distance);
 
         Ok(Self {
             distortion,

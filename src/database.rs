@@ -529,6 +529,9 @@ pub(crate) fn interpolate_distortion(
     if entries.is_empty() {
         return None;
     }
+    let mut entries = entries.to_vec();
+    entries.sort_by(|a, b| a.focal.total_cmp(&b.focal));
+
     if entries.len() == 1 {
         return Some(entries[0].model);
     }
@@ -576,6 +579,9 @@ pub(crate) fn interpolate_tca(entries: &[TcaEntry], focal: f32) -> Option<TcaMod
     if entries.is_empty() {
         return None;
     }
+    let mut entries = entries.to_vec();
+    entries.sort_by(|a, b| a.focal.total_cmp(&b.focal));
+
     if entries.len() == 1 {
         return Some(entries[0].model);
     }
@@ -904,6 +910,49 @@ mod tests {
             );
         } else {
             panic!("expected Poly3 model");
+        }
+    }
+
+    #[test]
+    fn interpolate_distortion_sorts_by_focal() {
+        let entries = vec![
+            DistortionEntry {
+                focal: 70.0,
+                model: DistortionModel::Poly3(Poly3Params { k1: 0.01 }),
+            },
+            DistortionEntry {
+                focal: 24.0,
+                model: DistortionModel::Poly3(Poly3Params { k1: -0.01 }),
+            },
+        ];
+
+        let m = interpolate_distortion(&entries, 47.0).unwrap();
+        if let DistortionModel::Poly3(params) = m {
+            assert!((params.k1 - 0.0).abs() < 1e-6);
+        } else {
+            panic!("expected Poly3 model");
+        }
+    }
+
+    #[test]
+    fn interpolate_tca_sorts_by_focal() {
+        let entries = vec![
+            TcaEntry {
+                focal: 70.0,
+                model: TcaModel::Linear(TcaLinearParams { kr: 1.02, kb: 0.98 }),
+            },
+            TcaEntry {
+                focal: 24.0,
+                model: TcaModel::Linear(TcaLinearParams { kr: 1.00, kb: 1.00 }),
+            },
+        ];
+
+        let m = interpolate_tca(&entries, 47.0).unwrap();
+        if let TcaModel::Linear(params) = m {
+            assert!((params.kr - 1.01).abs() < 1e-6);
+            assert!((params.kb - 0.99).abs() < 1e-6);
+        } else {
+            panic!("expected linear TCA model");
         }
     }
 

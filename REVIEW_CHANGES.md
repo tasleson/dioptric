@@ -43,7 +43,7 @@ rasterlab.
       location (e.g. barrel distortion moves corner pixels inward)
 - [x] Add a test for `from_xml` error path through the public API (not just
       the internal `ingest_bundled_file` helper)
-- [ ] Document the sort-by-focal-length precondition on interpolation functions,
+- [x] Document the sort-by-focal-length precondition on interpolation functions,
       or make them sort internally
 
 ## Search quality
