@@ -185,6 +185,78 @@ impl CorrectionProfile {
         self.warp_tca_raw(src, width, height, channels)
     }
 
+    // ── u16 linear raw-slice public API ──────────────────────────────────
+
+    /// Apply distortion, TCA, and vignetting corrections in sequence to u16
+    /// linear pixel data, returning a new buffer.
+    ///
+    /// `src` must be row-major `[R,G,B,…]` with no padding.  `channels` must
+    /// be 3 (RGB) or 4 (RGBA); the buffer length must equal
+    /// `width × height × channels`.  Values are expected in linear light
+    /// space (0–65535).
+    pub fn correct_all_raw_u16(
+        &self,
+        width: u32,
+        height: u32,
+        channels: u32,
+        src: &[u16],
+    ) -> Result<Vec<u16>> {
+        validate_buffer_u16(width, height, channels, src.len())?;
+        let after_dist = self.warp_distortion_raw_u16(src, width, height, channels)?;
+        let mut after_tca = self.warp_tca_raw_u16(&after_dist, width, height, channels)?;
+        self.correct_vignetting_raw_u16_inplace(&mut after_tca, width, height, channels);
+        Ok(after_tca)
+    }
+
+    /// Apply distortion correction only to u16 linear pixel data, returning a
+    /// new buffer.
+    ///
+    /// `channels` must be 3 (RGB) or 4 (RGBA).
+    pub fn correct_distortion_raw_u16(
+        &self,
+        width: u32,
+        height: u32,
+        channels: u32,
+        src: &[u16],
+    ) -> Result<Vec<u16>> {
+        validate_buffer_u16(width, height, channels, src.len())?;
+        self.warp_distortion_raw_u16(src, width, height, channels)
+    }
+
+    /// Apply vignetting correction in-place to u16 linear pixel data.
+    ///
+    /// Scales each pixel directly — no gamma conversion is performed since
+    /// 16-bit sensor data is typically already linear.  Only the first three
+    /// channels (RGB) are modified; a fourth channel (alpha) is left unchanged.
+    ///
+    /// `channels` must be 3 (RGB) or 4 (RGBA).
+    pub fn correct_vignetting_raw_u16(
+        &self,
+        width: u32,
+        height: u32,
+        channels: u32,
+        data: &mut [u16],
+    ) -> Result<()> {
+        validate_buffer_u16(width, height, channels, data.len())?;
+        self.correct_vignetting_raw_u16_inplace(data, width, height, channels);
+        Ok(())
+    }
+
+    /// Apply TCA (chromatic aberration) correction only to u16 linear pixel
+    /// data, returning a new buffer.
+    ///
+    /// `channels` must be 3 (RGB) or 4 (RGBA).
+    pub fn correct_tca_raw_u16(
+        &self,
+        width: u32,
+        height: u32,
+        channels: u32,
+        src: &[u16],
+    ) -> Result<Vec<u16>> {
+        validate_buffer_u16(width, height, channels, src.len())?;
+        self.warp_tca_raw_u16(src, width, height, channels)
+    }
+
     // ── f32 linear raw-slice public API ───────────────────────────────────
 
     /// Apply distortion, TCA, and vignetting corrections in sequence to f32
@@ -306,6 +378,124 @@ impl CorrectionProfile {
     }
 
     // ── internal helpers ────────────────────────────────────────────────
+
+    fn warp_distortion_raw_u16(&self, src: &[u16], w: u32, h: u32, ch: u32) -> Result<Vec<u16>> {
+        let model = match self.distortion {
+            Some(m) => m,
+            None => return Ok(src.to_vec()),
+        };
+
+        let (wf, hf) = (w as f32, h as f32);
+        let norm = normalisation_factor(wf, hf, self.crop_factor);
+        let cx = wf * 0.5;
+        let cy = hf * 0.5;
+        let ch = ch as usize;
+        let wi = w as i32;
+        let hi = h as i32;
+        let stride = w as usize * ch;
+
+        let mut dst = vec![0u16; src.len()];
+        for py in 0..h {
+            for px in 0..w {
+                let xn = (px as f32 - cx) / norm;
+                let yn = (py as f32 - cy) / norm;
+                let r_u = (xn * xn + yn * yn).sqrt();
+
+                let r_d = model.undistorted_to_distorted(r_u);
+                let scale = if r_u > 1e-8 { r_d / r_u } else { 1.0 };
+
+                let src_x = xn * scale * norm + cx;
+                let src_y = yn * scale * norm + cy;
+
+                let dst_idx = py as usize * stride + px as usize * ch;
+                bilinear_sample_raw_u16(
+                    src,
+                    wi,
+                    hi,
+                    ch,
+                    src_x,
+                    src_y,
+                    &mut dst[dst_idx..dst_idx + ch],
+                );
+            }
+        }
+        Ok(dst)
+    }
+
+    fn warp_tca_raw_u16(&self, src: &[u16], w: u32, h: u32, ch: u32) -> Result<Vec<u16>> {
+        let tca = match self.tca {
+            Some(m) => m,
+            None => return Ok(src.to_vec()),
+        };
+
+        let (wf, hf) = (w as f32, h as f32);
+        let norm = normalisation_factor(wf, hf, self.crop_factor);
+        let cx = wf * 0.5;
+        let cy = hf * 0.5;
+        let ch = ch as usize;
+        let wi = w as i32;
+        let hi = h as i32;
+        let stride = w as usize * ch;
+
+        let mut dst = vec![0u16; src.len()];
+        for py in 0..h {
+            for px in 0..w {
+                let xn = (px as f32 - cx) / norm;
+                let yn = (py as f32 - cy) / norm;
+                let r = (xn * xn + yn * yn).sqrt();
+
+                let (scale_r, scale_b) = tca.channel_radii(r);
+
+                let rx = xn * scale_r * norm + cx;
+                let ry = yn * scale_r * norm + cy;
+                let red = bilinear_sample_channel_raw_u16(src, wi, hi, ch, rx, ry, 0);
+
+                let bx = xn * scale_b * norm + cx;
+                let by = yn * scale_b * norm + cy;
+                let blue = bilinear_sample_channel_raw_u16(src, wi, hi, ch, bx, by, 2);
+
+                let src_idx = py as usize * stride + px as usize * ch;
+                let dst_idx = src_idx;
+                dst[dst_idx] = red;
+                dst[dst_idx + 1] = src[src_idx + 1];
+                dst[dst_idx + 2] = blue;
+
+                if ch == 4 {
+                    dst[dst_idx + 3] = src[src_idx + 3];
+                }
+            }
+        }
+        Ok(dst)
+    }
+
+    fn correct_vignetting_raw_u16_inplace(&self, data: &mut [u16], w: u32, h: u32, ch: u32) {
+        let params = match self.vignetting {
+            Some(p) => p,
+            None => return,
+        };
+
+        let (wf, hf) = (w as f32, h as f32);
+        let norm = normalisation_factor(wf, hf, self.crop_factor);
+        let cx = wf * 0.5;
+        let cy = hf * 0.5;
+        let ch = ch as usize;
+        let stride = w as usize * ch;
+
+        for py in 0..h {
+            for px in 0..w {
+                let xn = (px as f32 - cx) / norm;
+                let yn = (py as f32 - cy) / norm;
+                let r = (xn * xn + yn * yn).sqrt();
+                let factor = params.factor(r);
+
+                let idx = py as usize * stride + px as usize * ch;
+                for c in 0..3 {
+                    let scaled = data[idx + c] as f32 * factor;
+                    data[idx + c] = scaled.round().clamp(0.0, 65535.0) as u16;
+                }
+            }
+        }
+    }
 
     fn warp_distortion_raw_f32(&self, src: &[f32], w: u32, h: u32, ch: u32) -> Result<Vec<f32>> {
         let model = match self.distortion {
@@ -545,6 +735,25 @@ impl CorrectionProfile {
 
 // ── Validation ───────────────────────────────────────────────────────────────
 
+fn validate_buffer_u16(width: u32, height: u32, channels: u32, len: usize) -> Result<()> {
+    if channels != 3 && channels != 4 {
+        return Err(Error::UnsupportedImageFormat(format!(
+            "{channels} channels (expected 3 or 4)"
+        )));
+    }
+    let expected = width as usize * height as usize * channels as usize;
+    if len != expected {
+        return Err(Error::InvalidBufferLength {
+            expected,
+            actual: len,
+            width,
+            height,
+            channels,
+        });
+    }
+    Ok(())
+}
+
 fn validate_buffer_f32(width: u32, height: u32, channels: u32, len: usize) -> Result<()> {
     if channels != 3 && channels != 4 {
         return Err(Error::UnsupportedImageFormat(format!(
@@ -740,6 +949,69 @@ fn bilerp_f32(c00: f32, c10: f32, c01: f32, c11: f32, tx: f32, ty: f32) -> f32 {
     let top = c00 * (1.0 - tx) + c10 * tx;
     let bot = c01 * (1.0 - tx) + c11 * tx;
     top * (1.0 - ty) + bot * ty
+}
+
+// ── Bilinear interpolation on u16 slices ────────────────────────────────────
+
+fn bilinear_sample_raw_u16(
+    src: &[u16],
+    w: i32,
+    h: i32,
+    ch: usize,
+    x: f32,
+    y: f32,
+    out: &mut [u16],
+) {
+    let x0 = x.floor() as i32;
+    let y0 = y.floor() as i32;
+    let tx = x - x.floor();
+    let ty = y - y.floor();
+
+    for (c, dst) in out.iter_mut().enumerate().take(ch) {
+        let p00 = get_component_u16(src, w, h, ch, x0, y0, c);
+        let p10 = get_component_u16(src, w, h, ch, x0 + 1, y0, c);
+        let p01 = get_component_u16(src, w, h, ch, x0, y0 + 1, c);
+        let p11 = get_component_u16(src, w, h, ch, x0 + 1, y0 + 1, c);
+        *dst = bilerp_u16(p00, p10, p01, p11, tx, ty);
+    }
+}
+
+fn bilinear_sample_channel_raw_u16(
+    src: &[u16],
+    w: i32,
+    h: i32,
+    ch: usize,
+    x: f32,
+    y: f32,
+    channel: usize,
+) -> u16 {
+    let x0 = x.floor() as i32;
+    let y0 = y.floor() as i32;
+    let tx = x - x.floor();
+    let ty = y - y.floor();
+
+    let p00 = get_component_u16(src, w, h, ch, x0, y0, channel);
+    let p10 = get_component_u16(src, w, h, ch, x0 + 1, y0, channel);
+    let p01 = get_component_u16(src, w, h, ch, x0, y0 + 1, channel);
+    let p11 = get_component_u16(src, w, h, ch, x0 + 1, y0 + 1, channel);
+
+    bilerp_u16(p00, p10, p01, p11, tx, ty)
+}
+
+#[inline]
+fn get_component_u16(src: &[u16], w: i32, h: i32, ch: usize, x: i32, y: i32, c: usize) -> u16 {
+    if x < 0 || y < 0 || x >= w || y >= h {
+        0
+    } else {
+        src[y as usize * w as usize * ch + x as usize * ch + c]
+    }
+}
+
+#[inline]
+fn bilerp_u16(c00: u16, c10: u16, c01: u16, c11: u16, tx: f32, ty: f32) -> u16 {
+    let top = c00 as f32 * (1.0 - tx) + c10 as f32 * tx;
+    let bot = c01 as f32 * (1.0 - tx) + c11 as f32 * tx;
+    (top * (1.0 - ty) + bot * ty + 0.5) as u16
 }
 
 #[cfg(test)]
@@ -1057,6 +1329,176 @@ mod tests {
                 "alpha must be untouched, got {} at index {}",
                 data[i],
                 i
+            );
+        }
+    }
+
+    #[test]
+    fn bilinear_u16_exact_pixel() {
+        let pixel = [40000u16, 30000, 20000];
+        let data: Vec<u16> = pixel.iter().copied().cycle().take(10 * 10 * 3).collect();
+        let mut out = [0u16; 3];
+        bilinear_sample_raw_u16(&data, 10, 10, 3, 5.0, 5.0, &mut out);
+        assert_eq!(out, [40000, 30000, 20000]);
+    }
+
+    #[test]
+    fn bilinear_u16_out_of_bounds_zero() {
+        let pixel = [40000u16, 30000, 20000];
+        let data: Vec<u16> = pixel.iter().copied().cycle().take(10 * 10 * 3).collect();
+        let mut out = [1u16; 3];
+        bilinear_sample_raw_u16(&data, 10, 10, 3, -1.0, 5.0, &mut out);
+        assert_eq!(out, [0, 0, 0]);
+    }
+
+    #[test]
+    fn vignetting_u16_linear() {
+        use crate::database::{Calibration, Lens, VignettingEntry};
+        use crate::models::VignettingParams;
+
+        let lens = Lens {
+            maker: "Test".into(),
+            model: "Test 35mm".into(),
+            mounts: vec!["M42".into()],
+            crop_factor: Some(1.0),
+            calibration: Calibration {
+                distortions: vec![],
+                tcas: vec![],
+                vignettings: vec![VignettingEntry {
+                    focal: 35.0,
+                    aperture: 2.0,
+                    distance: 1000.0,
+                    params: VignettingParams {
+                        k1: -0.5,
+                        k2: 0.1,
+                        k3: -0.05,
+                    },
+                }],
+            },
+        };
+        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
+
+        let (w, h, ch) = (64u32, 64u32, 3u32);
+        let mut data = vec![50000u16; (w * h * ch) as usize];
+        profile
+            .correct_vignetting_raw_u16(w, h, ch, &mut data)
+            .unwrap();
+        let centre_idx = (32 * w as usize + 32) * ch as usize;
+        assert!(
+            (data[centre_idx] as i32 - 50000).unsigned_abs() < 200,
+            "centre should be nearly unchanged, got {}",
+            data[centre_idx]
+        );
+    }
+
+    #[test]
+    fn distortion_u16_no_data_returns_copy() {
+        use crate::database::{Calibration, Lens};
+
+        let lens = Lens {
+            maker: "Test".into(),
+            model: "Test 50mm".into(),
+            mounts: vec![],
+            crop_factor: Some(1.0),
+            calibration: Calibration::default(),
+        };
+        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
+
+        let src = vec![32000u16; 16 * 16 * 3];
+        let result = profile.correct_distortion_raw_u16(16, 16, 3, &src).unwrap();
+        assert_eq!(result, src);
+    }
+
+    #[test]
+    fn u16_invalid_buffer_length_rejected() {
+        use crate::database::{Calibration, Lens};
+
+        let lens = Lens {
+            maker: "Test".into(),
+            model: "Test 50mm".into(),
+            mounts: vec![],
+            crop_factor: Some(1.0),
+            calibration: Calibration::default(),
+        };
+        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
+
+        let src = vec![0u16; 100];
+        assert!(profile.correct_distortion_raw_u16(10, 10, 3, &src).is_err());
+    }
+
+    #[test]
+    fn u16_rgba_preserves_alpha() {
+        use crate::database::{Calibration, DistortionEntry, Lens};
+        use crate::models::Poly3Params;
+
+        let lens = Lens {
+            maker: "Test".into(),
+            model: "Test 50mm".into(),
+            mounts: vec![],
+            crop_factor: Some(1.0),
+            calibration: Calibration {
+                distortions: vec![DistortionEntry {
+                    focal: 50.0,
+                    model: DistortionModel::Poly3(Poly3Params { k1: 0.0 }),
+                }],
+                tcas: vec![],
+                vignettings: vec![],
+            },
+        };
+        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
+
+        let (w, h) = (16u32, 16u32);
+        let src: Vec<u16> = (0..w * h)
+            .flat_map(|_| [10000u16, 20000, 40000, 5000])
+            .collect();
+        let result = profile.correct_all_raw_u16(w, h, 4, &src).unwrap();
+        let centre = (8 * w as usize + 8) * 4;
+        assert_eq!(
+            result[centre + 3],
+            5000,
+            "alpha at centre must be preserved"
+        );
+    }
+
+    #[test]
+    fn u16_vignetting_skips_alpha() {
+        use crate::database::{Calibration, Lens, VignettingEntry};
+        use crate::models::VignettingParams;
+
+        let lens = Lens {
+            maker: "Test".into(),
+            model: "Test 35mm".into(),
+            mounts: vec![],
+            crop_factor: Some(1.0),
+            calibration: Calibration {
+                distortions: vec![],
+                tcas: vec![],
+                vignettings: vec![VignettingEntry {
+                    focal: 35.0,
+                    aperture: 2.0,
+                    distance: 1000.0,
+                    params: VignettingParams {
+                        k1: -0.5,
+                        k2: 0.1,
+                        k3: -0.05,
+                    },
+                }],
+            },
+        };
+        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
+
+        let (w, h, ch) = (16u32, 16u32, 4u32);
+        let mut data: Vec<u16> = (0..w * h)
+            .flat_map(|_| [50000u16, 50000, 50000, 60000])
+            .collect();
+        profile
+            .correct_vignetting_raw_u16(w, h, ch, &mut data)
+            .unwrap();
+        for i in (3..data.len()).step_by(4) {
+            assert_eq!(
+                data[i], 60000,
+                "alpha must be untouched, got {} at index {}",
+                data[i], i
             );
         }
     }

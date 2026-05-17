@@ -21,7 +21,7 @@ rasterlab.
 - [x] Support f32 linear pixel data in the correction pipeline to avoid
       sRGB↔linear quantisation loss for callers that already work in linear
       space
-- [ ] Support 16-bit pixel data (many cameras produce 14-bit raw)
+- [x] Support 16-bit pixel data (many cameras produce 14-bit raw)
 - [ ] Remove or use the `_crop_factor` parameter in `normalisation_factor`
       (currently dead code)
 

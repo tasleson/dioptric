@@ -39,6 +39,17 @@
 //! | [`CorrectionProfile::correct_vignetting_raw`] | In-place brightness correction |
 //! | [`CorrectionProfile::correct_tca_raw`] | Per-channel warp only |
 //!
+//! For callers working with 16-bit linear sensor data (many cameras produce
+//! 14-bit raw), the `_u16` methods operate on `&[u16]` / `&mut [u16]` with
+//! values in 0–65535 treated as linear:
+//!
+//! | Method | Description |
+//! |--------|-------------|
+//! | [`CorrectionProfile::correct_all_raw_u16`] | Distortion + TCA + vignetting |
+//! | [`CorrectionProfile::correct_distortion_raw_u16`] | Geometric warp only |
+//! | [`CorrectionProfile::correct_vignetting_raw_u16`] | In-place brightness correction |
+//! | [`CorrectionProfile::correct_tca_raw_u16`] | Per-channel warp only |
+//!
 //! For callers working in linear f32 space (HDR pipelines, raw processors),
 //! equivalent `_f32` methods avoid sRGB↔linear quantisation loss:
 //!
