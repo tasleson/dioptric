@@ -22,7 +22,7 @@ rasterlab.
       sRGB↔linear quantisation loss for callers that already work in linear
       space
 - [x] Support 16-bit pixel data (many cameras produce 14-bit raw)
-- [ ] Remove or use the `_crop_factor` parameter in `normalisation_factor`
+- [x] Remove or use the `_crop_factor` parameter in `normalisation_factor`
       (currently dead code)
 
 ## Rasterlab compatibility

@@ -825,11 +825,13 @@ fn unsupported_image_format(img: &DynamicImage) -> Error {
 
 // ── Geometry helpers ─────────────────────────────────────────────────────────
 
-/// Compute the normalisation factor (half image diagonal in pixels) that maps
-/// pixel coordinates to the lensfun normalised coordinate system.
+/// Compute the normalisation factor that maps pixel coordinates to the lensfun
+/// normalised coordinate system.  Lensfun calibration data is expressed relative
+/// to a full-frame (crop=1) sensor, so on a crop sensor the normalised radius
+/// must be scaled by 1/crop_factor.
 #[inline]
-fn normalisation_factor(w: f32, h: f32, _crop_factor: f32) -> f32 {
-    (w * w + h * h).sqrt() * 0.5
+fn normalisation_factor(w: f32, h: f32, crop_factor: f32) -> f32 {
+    (w * w + h * h).sqrt() * 0.5 / crop_factor
 }
 
 // ── Bilinear interpolation on raw slices ─────────────────────────────────────
@@ -1041,6 +1043,10 @@ mod tests {
         let n = normalisation_factor(100.0, 100.0, 1.0);
         let expected = (100_f32 * 100.0 * 2.0).sqrt() * 0.5;
         assert!((n - expected).abs() < 1e-4);
+
+        let n_crop = normalisation_factor(100.0, 100.0, 1.5);
+        let expected_crop = (100_f32 * 100.0 * 2.0).sqrt() * 0.5 / 1.5;
+        assert!((n_crop - expected_crop).abs() < 1e-4);
     }
 
     #[test]
