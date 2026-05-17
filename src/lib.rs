@@ -36,6 +36,10 @@
 //! | [`CorrectionProfile::correct_vignetting`] | In-place brightness correction |
 //! | [`CorrectionProfile::correct_tca`] | Per-channel warp only |
 //!
+//! The image correction API currently supports `DynamicImage::ImageRgb8` and
+//! `DynamicImage::ImageRgba8`. `Rgba8` inputs preserve alpha; other image
+//! formats return [`Error::UnsupportedImageFormat`].
+//!
 //! ## Database lookup
 //!
 //! [`Database::find_camera`] and [`Database::find_lens`] perform

@@ -87,14 +87,20 @@ struct RawVignetting {
     k3: f32,
 }
 
+#[derive(Debug, Deserialize)]
+enum RawCalibrationEntry {
+    #[serde(rename = "distortion")]
+    Distortion(RawDistortion),
+    #[serde(rename = "tca")]
+    Tca(RawTca),
+    #[serde(rename = "vignetting")]
+    Vignetting(RawVignetting),
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct RawCalibration {
-    #[serde(rename = "distortion", default)]
-    distortions: Vec<RawDistortion>,
-    #[serde(rename = "tca", default)]
-    tcas: Vec<RawTca>,
-    #[serde(rename = "vignetting", default)]
-    vignetings: Vec<RawVignetting>,
+    #[serde(rename = "$value", default)]
+    entries: Vec<RawCalibrationEntry>,
 }
 
 /// A single `<lens>` element.
@@ -228,35 +234,38 @@ fn convert_lens(raw: RawLens) -> Lens {
     let mut cal = Calibration::default();
 
     if let Some(raw_cal) = raw.calibration {
-        for d in &raw_cal.distortions {
-            // Skip entries with unknown model names
-            if let Ok(model) = parse_distortion(d) {
-                cal.distortions.push(DistortionEntry {
-                    focal: d.focal,
-                    model,
-                });
-            }
-        }
-        for t in &raw_cal.tcas {
-            if let Ok(model) = parse_tca(t) {
-                cal.tcas.push(TcaEntry {
-                    focal: t.focal,
-                    model,
-                });
-            }
-        }
-        for v in &raw_cal.vignetings {
-            if v.model == "pa" {
-                cal.vignetings.push(VignettingEntry {
-                    focal: v.focal,
-                    aperture: v.aperture,
-                    distance: v.distance,
-                    params: VignettingParams {
-                        k1: v.k1,
-                        k2: v.k2,
-                        k3: v.k3,
-                    },
-                });
+        for entry in raw_cal.entries {
+            match entry {
+                RawCalibrationEntry::Distortion(d) => {
+                    if let Ok(model) = parse_distortion(&d) {
+                        cal.distortions.push(DistortionEntry {
+                            focal: d.focal,
+                            model,
+                        });
+                    }
+                }
+                RawCalibrationEntry::Tca(t) => {
+                    if let Ok(model) = parse_tca(&t) {
+                        cal.tcas.push(TcaEntry {
+                            focal: t.focal,
+                            model,
+                        });
+                    }
+                }
+                RawCalibrationEntry::Vignetting(v) => {
+                    if v.model == "pa" {
+                        cal.vignetings.push(VignettingEntry {
+                            focal: v.focal,
+                            aperture: v.aperture,
+                            distance: v.distance,
+                            params: VignettingParams {
+                                k1: v.k1,
+                                k2: v.k2,
+                                k3: v.k3,
+                            },
+                        });
+                    }
+                }
             }
         }
     }
@@ -318,10 +327,8 @@ impl Database {
             if !name.ends_with(".xml") {
                 continue;
             }
-            if let Ok(text) = std::str::from_utf8(entry.contents()) {
-                // Best-effort: skip files that fail to parse
-                let _ = db.ingest_xml(text);
-            }
+            db.ingest_bundled_file(&name, entry.contents())
+                .unwrap_or_else(|err| panic!("failed to load bundled database file {name}: {err}"));
         }
         db
     }
@@ -357,6 +364,17 @@ impl Database {
             self.lenses.push(convert_lens(l));
         }
         Ok(())
+    }
+
+    fn ingest_bundled_file(
+        &mut self,
+        name: &str,
+        contents: &[u8],
+    ) -> std::result::Result<(), String> {
+        let text = std::str::from_utf8(contents)
+            .map_err(|err| format!("invalid UTF-8 in {name}: {err}"))?;
+        self.ingest_xml(text)
+            .map_err(|err| format!("invalid XML in {name}: {err}"))
     }
 
     /// Create an empty database.
@@ -508,123 +526,103 @@ pub(crate) fn interpolate_tca(entries: &[TcaEntry], focal: f32) -> Option<TcaMod
     Some(model)
 }
 
-/// Bilinear interpolation of vignetting parameters over focal × aperture.
-///
-/// Distance is not interpolated — the entry with the largest distance
-/// (infinite focus) is preferred for each (focal, aperture) pair.
+/// Trilinear interpolation of vignetting parameters over focal × aperture ×
+/// distance, with each axis clamped to the calibrated range.
 pub(crate) fn interpolate_vignetting(
     entries: &[VignettingEntry],
     focal: f32,
     aperture: f32,
+    distance: f32,
 ) -> Option<VignettingParams> {
     if entries.is_empty() {
         return None;
     }
 
-    // Collapse distance: for each (focal, aperture) keep the entry with the
-    // greatest distance (closest to infinity).
-    let mut deduped: Vec<(f32, f32, VignettingParams)> = Vec::new();
-    for e in entries {
-        if let Some(existing) = deduped
-            .iter_mut()
-            .find(|(f, a, _)| (*f - e.focal).abs() < 1e-4 && (*a - e.aperture).abs() < 1e-4)
-        {
-            // Keep the largest distance (most representative of typical shooting)
-            let old_dist = entries
-                .iter()
-                .find(|x| {
-                    (x.focal - existing.0).abs() < 1e-4 && (x.aperture - existing.1).abs() < 1e-4
-                })
-                .map(|x| x.distance)
-                .unwrap_or(0.0);
-            if e.distance > old_dist {
-                existing.2 = e.params;
-            }
-        } else {
-            deduped.push((e.focal, e.aperture, e.params));
-        }
-    }
-
-    if deduped.is_empty() {
-        return None;
-    }
-
     // Unique focal lengths
-    let mut focals: Vec<f32> = deduped.iter().map(|(f, _, _)| *f).collect();
+    let mut focals: Vec<f32> = entries.iter().map(|entry| entry.focal).collect();
     focals.sort_by(f32::total_cmp);
     focals.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
 
     // Unique apertures
-    let mut apertures: Vec<f32> = deduped.iter().map(|(_, a, _)| *a).collect();
+    let mut apertures: Vec<f32> = entries.iter().map(|entry| entry.aperture).collect();
     apertures.sort_by(f32::total_cmp);
     apertures.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
 
-    // For a given (f, a) pair, look up the params (or None if not present)
-    let lookup = |f: f32, a: f32| -> Option<VignettingParams> {
-        deduped
+    // Unique focus distances
+    let mut distances: Vec<f32> = entries.iter().map(|entry| entry.distance).collect();
+    distances.sort_by(f32::total_cmp);
+    distances.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+
+    // For a given (f, a, d) tuple, look up the params (or None if not present).
+    let lookup = |f: f32, a: f32, d: f32| -> Option<VignettingParams> {
+        entries
             .iter()
-            .find(|(df, da, _)| (*df - f).abs() < 1e-4 && (*da - a).abs() < 1e-4)
-            .map(|(_, _, p)| *p)
+            .find(|entry| {
+                (entry.focal - f).abs() < 1e-4
+                    && (entry.aperture - a).abs() < 1e-4
+                    && (entry.distance - d).abs() < 1e-4
+            })
+            .map(|entry| entry.params)
     };
 
-    // Interpolate along the focal axis for each aperture bound
+    fn axis_bounds(values: &[f32], sample: f32) -> Option<(f32, f32, f32)> {
+        if values.is_empty() {
+            return None;
+        }
+        let clamped = sample.clamp(values[0], values[values.len() - 1]);
+        if values.len() == 1 {
+            return Some((values[0], values[0], 0.0));
+        }
+
+        let idx = values.partition_point(|&x| x < clamped);
+        let (lo, hi) = if idx == 0 {
+            (values[0], values[1])
+        } else if idx >= values.len() {
+            (values[values.len() - 2], values[values.len() - 1])
+        } else {
+            (values[idx - 1], values[idx])
+        };
+        let t = if (hi - lo).abs() < 1e-6 {
+            0.0
+        } else {
+            (clamped - lo) / (hi - lo)
+        };
+        Some((lo, hi, t))
+    }
+
+    // Interpolate along the focal axis for each aperture + distance bound.
     fn interp_focal(
         focals: &[f32],
         focal: f32,
         aperture: f32,
-        lookup: &dyn Fn(f32, f32) -> Option<VignettingParams>,
+        distance: f32,
+        lookup: &dyn Fn(f32, f32, f32) -> Option<VignettingParams>,
     ) -> Option<VignettingParams> {
-        if focals.is_empty() {
-            return None;
-        }
-        let clamped_f = focal.clamp(focals[0], focals[focals.len() - 1]);
-        if focals.len() == 1 {
-            return lookup(focals[0], aperture);
-        }
-        let idx = focals.partition_point(|&x| x < clamped_f);
-        let (f0, f1) = if idx == 0 {
-            (focals[0], focals[1])
-        } else if idx >= focals.len() {
-            (focals[focals.len() - 2], focals[focals.len() - 1])
-        } else {
-            (focals[idx - 1], focals[idx])
-        };
-        let t = if (f1 - f0).abs() < 1e-6 {
-            0.0
-        } else {
-            (clamped_f - f0) / (f1 - f0)
-        };
-        let p0 = lookup(f0, aperture)?;
-        let p1 = lookup(f1, aperture)?;
+        let (f0, f1, t) = axis_bounds(focals, focal)?;
+        let p0 = lookup(f0, aperture, distance)?;
+        let p1 = lookup(f1, aperture, distance)?;
         Some(VignettingParams::lerp(p0, p1, t))
     }
 
-    // Clamp aperture
-    let clamped_a = aperture.clamp(apertures[0], apertures[apertures.len() - 1]);
-    if apertures.len() == 1 {
-        return interp_focal(&focals, focal, apertures[0], &lookup);
+    // Interpolate along the aperture axis at a fixed distance.
+    fn interp_aperture(
+        focals: &[f32],
+        apertures: &[f32],
+        focal: f32,
+        aperture: f32,
+        distance: f32,
+        lookup: &dyn Fn(f32, f32, f32) -> Option<VignettingParams>,
+    ) -> Option<VignettingParams> {
+        let (a0, a1, t) = axis_bounds(apertures, aperture)?;
+        let p0 = interp_focal(focals, focal, a0, distance, lookup)?;
+        let p1 = interp_focal(focals, focal, a1, distance, lookup)?;
+        Some(VignettingParams::lerp(p0, p1, t))
     }
 
-    let aidx = apertures.partition_point(|&x| x < clamped_a);
-    let (a0, a1) = if aidx == 0 {
-        (apertures[0], apertures[1])
-    } else if aidx >= apertures.len() {
-        (
-            apertures[apertures.len() - 2],
-            apertures[apertures.len() - 1],
-        )
-    } else {
-        (apertures[aidx - 1], apertures[aidx])
-    };
-    let at = if (a1 - a0).abs() < 1e-6 {
-        0.0
-    } else {
-        (clamped_a - a0) / (a1 - a0)
-    };
-
-    let p0 = interp_focal(&focals, focal, a0, &lookup)?;
-    let p1 = interp_focal(&focals, focal, a1, &lookup)?;
-    Some(VignettingParams::lerp(p0, p1, at))
+    let (d0, d1, t) = axis_bounds(&distances, distance)?;
+    let p0 = interp_aperture(&focals, &apertures, focal, aperture, d0, &lookup)?;
+    let p1 = interp_aperture(&focals, &apertures, focal, aperture, d1, &lookup)?;
+    Some(VignettingParams::lerp(p0, p1, t))
 }
 
 #[cfg(test)]
@@ -655,6 +653,33 @@ mod tests {
         db.from_xml(xml).expect("parse should succeed");
         assert_eq!(db.cameras().len(), 1);
         assert_eq!(db.lenses().len(), 1);
+    }
+
+    #[test]
+    fn parse_interleaved_calibration_entries() {
+        let xml = r#"<lensdatabase version="2">
+  <lens>
+    <maker>Acme</maker>
+    <model>Acme Zoom</model>
+    <mount>M42</mount>
+    <cropfactor>1.0</cropfactor>
+    <calibration>
+      <distortion model="poly3" focal="24" k1="-0.01"/>
+      <tca model="linear" focal="24" kr="1.001" kb="0.999"/>
+      <vignetting model="pa" focal="24" aperture="2.8" distance="1" k1="-0.3" k2="0.1" k3="-0.05"/>
+      <distortion model="poly3" focal="70" k1="0.01"/>
+      <tca model="linear" focal="70" kr="1.002" kb="0.998"/>
+      <vignetting model="pa" focal="70" aperture="4" distance="10" k1="-0.2" k2="0.05" k3="-0.01"/>
+    </calibration>
+  </lens>
+</lensdatabase>"#;
+
+        let mut db = Database::empty();
+        db.from_xml(xml).expect("parse should succeed");
+        let lens = db.find_lens("Acme", "Zoom").expect("lens should load");
+        assert_eq!(lens.calibration.distortions.len(), 2);
+        assert_eq!(lens.calibration.tcas.len(), 2);
+        assert_eq!(lens.calibration.vignetings.len(), 2);
     }
 
     #[test]
@@ -695,6 +720,24 @@ mod tests {
     }
 
     #[test]
+    fn bundled_loader_rejects_invalid_utf8() {
+        let mut db = Database::empty();
+        let err = db.ingest_bundled_file("broken.xml", &[0xff]).unwrap_err();
+        assert!(err.contains("invalid UTF-8"));
+        assert!(err.contains("broken.xml"));
+    }
+
+    #[test]
+    fn bundled_loader_rejects_invalid_xml() {
+        let mut db = Database::empty();
+        let err = db
+            .ingest_bundled_file("broken.xml", br#"<lensdatabase><camera>"#)
+            .unwrap_err();
+        assert!(err.contains("invalid XML"));
+        assert!(err.contains("broken.xml"));
+    }
+
+    #[test]
     fn interpolate_distortion_clamping() {
         let entries = vec![
             DistortionEntry {
@@ -722,5 +765,42 @@ mod tests {
         } else {
             panic!("expected Poly3 model");
         }
+    }
+
+    #[test]
+    fn interpolate_vignetting_respects_distance() {
+        let entries = vec![
+            VignettingEntry {
+                focal: 35.0,
+                aperture: 2.0,
+                distance: 1.0,
+                params: VignettingParams {
+                    k1: -0.1,
+                    k2: 0.0,
+                    k3: 0.0,
+                },
+            },
+            VignettingEntry {
+                focal: 35.0,
+                aperture: 2.0,
+                distance: 10.0,
+                params: VignettingParams {
+                    k1: -0.4,
+                    k2: 0.0,
+                    k3: 0.0,
+                },
+            },
+        ];
+
+        let near = interpolate_vignetting(&entries, 35.0, 2.0, 1.0).unwrap();
+        let far = interpolate_vignetting(&entries, 35.0, 2.0, 10.0).unwrap();
+        let mid = interpolate_vignetting(&entries, 35.0, 2.0, 5.5).unwrap();
+
+        assert_eq!(near.k1, -0.1);
+        assert_eq!(far.k1, -0.4);
+        assert!(
+            (mid.k1 + 0.25).abs() < 1e-6,
+            "expected midpoint interpolation"
+        );
     }
 }

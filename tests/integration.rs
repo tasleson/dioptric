@@ -1,5 +1,5 @@
 use dioptric::{CorrectionProfile, Database};
-use image::{DynamicImage, GenericImageView, RgbImage};
+use image::{DynamicImage, GenericImageView, RgbImage, RgbaImage};
 
 // ── Database loading ───────────────────────────────────────────────────────────
 
@@ -76,6 +76,54 @@ fn profile_invalid_aperture_returns_error() {
     assert!(result.is_err());
 }
 
+#[test]
+fn profile_uses_focus_distance_for_vignetting() {
+    use dioptric::database::{Calibration, Lens, VignettingEntry};
+    use dioptric::models::VignettingParams;
+
+    let lens = Lens {
+        maker: "Test".into(),
+        model: "Distance-sensitive vignette".into(),
+        mounts: vec![],
+        crop_factor: Some(1.0),
+        calibration: Calibration {
+            distortions: vec![],
+            tcas: vec![],
+            vignetings: vec![
+                VignettingEntry {
+                    focal: 35.0,
+                    aperture: 2.0,
+                    distance: 1.0,
+                    params: VignettingParams {
+                        k1: -0.1,
+                        k2: 0.0,
+                        k3: 0.0,
+                    },
+                },
+                VignettingEntry {
+                    focal: 35.0,
+                    aperture: 2.0,
+                    distance: 10.0,
+                    params: VignettingParams {
+                        k1: -0.4,
+                        k2: 0.0,
+                        k3: 0.0,
+                    },
+                },
+            ],
+        },
+    };
+
+    let near = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 1.0).unwrap();
+    let far = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
+    let mid = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 5.5).unwrap();
+
+    assert_ne!(near.vignetting, far.vignetting);
+    assert_eq!(near.vignetting.unwrap().k1, -0.1);
+    assert_eq!(far.vignetting.unwrap().k1, -0.4);
+    assert!((mid.vignetting.unwrap().k1 + 0.25).abs() < 1e-6);
+}
+
 // ── Correction smoke tests ─────────────────────────────────────────────────────
 
 /// Make a small uniform-colour test image.
@@ -135,7 +183,7 @@ fn vignetting_brightens_uniform_white_at_centre() {
     // A medium-grey uniform image: the centre should not change much.
     let mut img = DynamicImage::ImageRgb8(RgbImage::from_pixel(64, 64, image::Rgb([128u8; 3])));
     let before_centre = img.to_rgb8().get_pixel(32, 32).0;
-    profile.correct_vignetting(&mut img);
+    profile.correct_vignetting(&mut img).unwrap();
     let after_centre = img.to_rgb8().get_pixel(32, 32).0;
     // Centre pixel brightness should be nearly unchanged
     for ch in 0..3 {
@@ -147,6 +195,33 @@ fn vignetting_brightens_uniform_white_at_centre() {
             after_centre[ch]
         );
     }
+}
+
+#[test]
+fn correct_all_preserves_rgba_alpha() {
+    use image::Rgba;
+
+    let db = Database::bundled();
+    let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
+    let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
+    let profile = CorrectionProfile::new(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
+
+    let img = DynamicImage::ImageRgba8(RgbaImage::from_pixel(32, 24, Rgba([10, 20, 30, 77])));
+    let corrected = profile.correct_all(&img).unwrap().to_rgba8();
+    assert_eq!(corrected.dimensions(), (32, 24));
+    assert_eq!(corrected.get_pixel(16, 12)[3], 77);
+}
+
+#[test]
+fn grayscale_inputs_return_an_error() {
+    let db = Database::bundled();
+    let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
+    let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
+    let profile = CorrectionProfile::new(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
+
+    let img = DynamicImage::ImageLuma8(image::GrayImage::from_pixel(16, 16, image::Luma([128])));
+    let err = profile.correct_all(&img).unwrap_err();
+    assert!(matches!(err, dioptric::Error::UnsupportedImageFormat(_)));
 }
 
 // ── Round-trip sanity: identity params → image unchanged ─────────────────────

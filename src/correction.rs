@@ -5,7 +5,7 @@
 //! three correction operations can be applied individually or all at once via
 //! [`CorrectionProfile::correct_all`].
 
-use image::{DynamicImage, RgbImage};
+use image::{DynamicImage, GrayImage, Luma, RgbImage, Rgba, RgbaImage};
 
 use crate::database::{Lens, interpolate_distortion, interpolate_tca, interpolate_vignetting};
 use crate::error::{Error, Result};
@@ -100,7 +100,7 @@ impl CorrectionProfile {
 
         let distortion = interpolate_distortion(&dist_entries, focal);
         let tca = interpolate_tca(&tca_entries, focal);
-        let vignetting = interpolate_vignetting(&vig_entries, focal, aperture);
+        let vignetting = interpolate_vignetting(&vig_entries, focal, aperture, distance);
 
         Ok(Self {
             distortion,
@@ -115,8 +115,9 @@ impl CorrectionProfile {
     /// Distortion and TCA are applied as image warps; vignetting is applied
     /// in-place on the result.
     ///
-    /// Returns the corrected image, or the input image unchanged if no
-    /// calibration data is available for any correction.
+    /// Supports `DynamicImage::ImageRgb8` and `DynamicImage::ImageRgba8`.
+    /// `Rgba8` inputs preserve alpha; other image formats return
+    /// [`Error::UnsupportedImageFormat`].
     ///
     /// # Example
     ///
@@ -133,47 +134,118 @@ impl CorrectionProfile {
     /// let corrected = profile.correct_all(&img).unwrap();
     /// ```
     pub fn correct_all(&self, img: &DynamicImage) -> Result<DynamicImage> {
-        let rgb = img.to_rgb8();
-        let after_dist = self.warp_distortion_rgb(&rgb)?;
-        let mut after_tca = self.warp_tca_rgb(&after_dist)?;
-        self.correct_vignetting_inplace(&mut after_tca);
-        Ok(DynamicImage::ImageRgb8(after_tca))
+        match img {
+            DynamicImage::ImageRgb8(rgb) => {
+                let after_dist = self.warp_distortion_rgb(rgb)?;
+                let mut after_tca = self.warp_tca_rgb(&after_dist)?;
+                self.correct_vignetting_inplace(&mut after_tca);
+                Ok(DynamicImage::ImageRgb8(after_tca))
+            }
+            DynamicImage::ImageRgba8(rgba) => {
+                let rgb = rgb_from_rgba(rgba);
+                let alpha = alpha_from_rgba(rgba);
+                let after_dist = self.warp_distortion_rgb(&rgb)?;
+                let warped_alpha = self.warp_distortion_gray(&alpha)?;
+                let mut after_tca = self.warp_tca_rgb(&after_dist)?;
+                self.correct_vignetting_inplace(&mut after_tca);
+                Ok(DynamicImage::ImageRgba8(rgba_from_rgb_and_alpha(
+                    &after_tca,
+                    &warped_alpha,
+                )))
+            }
+            _ => Err(unsupported_image_format(img)),
+        }
     }
 
     /// Apply distortion correction only, returning a new image.
     ///
-    /// If no distortion calibration is available, returns a clone of the input.
+    /// Supports `DynamicImage::ImageRgb8` and `DynamicImage::ImageRgba8`.
+    /// `Rgba8` inputs preserve alpha; other image formats return
+    /// [`Error::UnsupportedImageFormat`].
     pub fn correct_distortion(&self, img: &DynamicImage) -> Result<DynamicImage> {
-        let rgb = img.to_rgb8();
-        let result = if self.distortion.is_some() {
-            self.warp_distortion_rgb(&rgb)?
-        } else {
-            rgb
-        };
-        Ok(DynamicImage::ImageRgb8(result))
+        match img {
+            DynamicImage::ImageRgb8(rgb) => {
+                let result = if self.distortion.is_some() {
+                    self.warp_distortion_rgb(rgb)?
+                } else {
+                    rgb.clone()
+                };
+                Ok(DynamicImage::ImageRgb8(result))
+            }
+            DynamicImage::ImageRgba8(rgba) => {
+                let rgb = rgb_from_rgba(rgba);
+                let alpha = alpha_from_rgba(rgba);
+                let warped_rgb = if self.distortion.is_some() {
+                    self.warp_distortion_rgb(&rgb)?
+                } else {
+                    rgb
+                };
+                let warped_alpha = if self.distortion.is_some() {
+                    self.warp_distortion_gray(&alpha)?
+                } else {
+                    alpha
+                };
+                Ok(DynamicImage::ImageRgba8(rgba_from_rgb_and_alpha(
+                    &warped_rgb,
+                    &warped_alpha,
+                )))
+            }
+            _ => Err(unsupported_image_format(img)),
+        }
     }
 
     /// Apply vignetting correction in-place.
     ///
     /// Converts sRGB → linear, scales each pixel, then converts back.
-    /// If no vignetting calibration is available, the image is unchanged.
-    pub fn correct_vignetting(&self, img: &mut DynamicImage) {
-        let mut rgb = img.to_rgb8();
-        self.correct_vignetting_inplace(&mut rgb);
-        *img = DynamicImage::ImageRgb8(rgb);
+    /// Supports `DynamicImage::ImageRgb8` and `DynamicImage::ImageRgba8`.
+    /// `Rgba8` inputs preserve alpha; other image formats return
+    /// [`Error::UnsupportedImageFormat`].
+    pub fn correct_vignetting(&self, img: &mut DynamicImage) -> Result<()> {
+        match img {
+            DynamicImage::ImageRgb8(rgb) => {
+                self.correct_vignetting_inplace(rgb);
+                Ok(())
+            }
+            DynamicImage::ImageRgba8(rgba) => {
+                let mut rgb = rgb_from_rgba(rgba);
+                self.correct_vignetting_inplace(&mut rgb);
+                let alpha = alpha_from_rgba(rgba);
+                *img = DynamicImage::ImageRgba8(rgba_from_rgb_and_alpha(&rgb, &alpha));
+                Ok(())
+            }
+            _ => Err(unsupported_image_format(img)),
+        }
     }
 
     /// Apply TCA (chromatic aberration) correction only, returning a new image.
     ///
-    /// If no TCA calibration is available, returns a clone of the input.
+    /// Supports `DynamicImage::ImageRgb8` and `DynamicImage::ImageRgba8`.
+    /// `Rgba8` inputs preserve alpha; other image formats return
+    /// [`Error::UnsupportedImageFormat`].
     pub fn correct_tca(&self, img: &DynamicImage) -> Result<DynamicImage> {
-        let rgb = img.to_rgb8();
-        let result = if self.tca.is_some() {
-            self.warp_tca_rgb(&rgb)?
-        } else {
-            rgb
-        };
-        Ok(DynamicImage::ImageRgb8(result))
+        match img {
+            DynamicImage::ImageRgb8(rgb) => {
+                let result = if self.tca.is_some() {
+                    self.warp_tca_rgb(rgb)?
+                } else {
+                    rgb.clone()
+                };
+                Ok(DynamicImage::ImageRgb8(result))
+            }
+            DynamicImage::ImageRgba8(rgba) => {
+                let rgb = rgb_from_rgba(rgba);
+                let result = if self.tca.is_some() {
+                    self.warp_tca_rgb(&rgb)?
+                } else {
+                    rgb
+                };
+                Ok(DynamicImage::ImageRgba8(rgba_from_rgb_and_alpha(
+                    &result,
+                    &alpha_from_rgba(rgba),
+                )))
+            }
+            _ => Err(unsupported_image_format(img)),
+        }
     }
 
     // ── internal helpers ─────────────────────────────────────────────────────
@@ -251,6 +323,40 @@ impl CorrectionProfile {
                 let blue = bilinear_sample_channel(src, bx, by, 2);
 
                 dst.put_pixel(px, py, image::Rgb([red, green, blue]));
+            }
+        }
+        Ok(dst)
+    }
+
+    /// Warp a single-channel image with the same distortion mapping used for RGB.
+    fn warp_distortion_gray(&self, src: &GrayImage) -> Result<GrayImage> {
+        let model = match self.distortion {
+            Some(m) => m,
+            None => return Ok(src.clone()),
+        };
+
+        let (w, h) = src.dimensions();
+        let (wf, hf) = (w as f32, h as f32);
+        let norm = normalisation_factor(wf, hf, self.crop_factor);
+
+        let cx = wf * 0.5;
+        let cy = hf * 0.5;
+
+        let mut dst = GrayImage::new(w, h);
+        for py in 0..h {
+            for px in 0..w {
+                let xn = (px as f32 - cx) / norm;
+                let yn = (py as f32 - cy) / norm;
+                let r_u = (xn * xn + yn * yn).sqrt();
+
+                let r_d = model.undistorted_to_distorted(r_u);
+                let scale = if r_u > 1e-8 { r_d / r_u } else { 1.0 };
+
+                let src_x = xn * scale * norm + cx;
+                let src_y = yn * scale * norm + cy;
+
+                let pixel = bilinear_sample_gray(src, src_x, src_y);
+                dst.put_pixel(px, py, pixel);
             }
         }
         Ok(dst)
@@ -346,11 +452,40 @@ fn bilinear_sample_channel(src: &RgbImage, x: f32, y: f32, channel: usize) -> u8
     bilerp(p00, p10, p01, p11, tx, ty)
 }
 
+/// Sample a grayscale pixel from `src` at floating-point coordinates using
+/// bilinear interpolation. Out-of-bounds coordinates return black.
+fn bilinear_sample_gray(src: &GrayImage, x: f32, y: f32) -> Luma<u8> {
+    let (w, h) = src.dimensions();
+    let (w, h) = (w as i32, h as i32);
+
+    let x0 = x.floor() as i32;
+    let y0 = y.floor() as i32;
+    let tx = x - x.floor();
+    let ty = y - y.floor();
+
+    let p00 = get_gray_pixel_clamped(src, x0, y0, w, h)[0];
+    let p10 = get_gray_pixel_clamped(src, x0 + 1, y0, w, h)[0];
+    let p01 = get_gray_pixel_clamped(src, x0, y0 + 1, w, h)[0];
+    let p11 = get_gray_pixel_clamped(src, x0 + 1, y0 + 1, w, h)[0];
+
+    Luma([bilerp(p00, p10, p01, p11, tx, ty)])
+}
+
 /// Fetch a pixel, returning black for out-of-bounds coordinates.
 #[inline]
 fn get_pixel_clamped(src: &RgbImage, x: i32, y: i32, w: i32, h: i32) -> image::Rgb<u8> {
     if x < 0 || y < 0 || x >= w || y >= h {
         image::Rgb([0, 0, 0])
+    } else {
+        *src.get_pixel(x as u32, y as u32)
+    }
+}
+
+/// Fetch a grayscale pixel, returning black for out-of-bounds coordinates.
+#[inline]
+fn get_gray_pixel_clamped(src: &GrayImage, x: i32, y: i32, w: i32, h: i32) -> Luma<u8> {
+    if x < 0 || y < 0 || x >= w || y >= h {
+        Luma([0])
     } else {
         *src.get_pixel(x as u32, y as u32)
     }
@@ -362,6 +497,45 @@ fn bilerp(c00: u8, c10: u8, c01: u8, c11: u8, tx: f32, ty: f32) -> u8 {
     let top = c00 as f32 * (1.0 - tx) + c10 as f32 * tx;
     let bot = c01 as f32 * (1.0 - tx) + c11 as f32 * tx;
     (top * (1.0 - ty) + bot * ty + 0.5) as u8
+}
+
+fn rgb_from_rgba(src: &RgbaImage) -> RgbImage {
+    let (w, h) = src.dimensions();
+    let mut rgb = RgbImage::new(w, h);
+    for (x, y, pixel) in src.enumerate_pixels() {
+        rgb.put_pixel(x, y, image::Rgb([pixel[0], pixel[1], pixel[2]]));
+    }
+    rgb
+}
+
+fn alpha_from_rgba(src: &RgbaImage) -> GrayImage {
+    let (w, h) = src.dimensions();
+    let mut alpha = GrayImage::new(w, h);
+    for (x, y, pixel) in src.enumerate_pixels() {
+        alpha.put_pixel(x, y, Luma([pixel[3]]));
+    }
+    alpha
+}
+
+fn rgba_from_rgb_and_alpha(rgb: &RgbImage, alpha: &GrayImage) -> RgbaImage {
+    let (w, h) = rgb.dimensions();
+    let mut rgba = RgbaImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let rgb_pixel = rgb.get_pixel(x, y);
+            let alpha_pixel = alpha.get_pixel(x, y);
+            rgba.put_pixel(
+                x,
+                y,
+                Rgba([rgb_pixel[0], rgb_pixel[1], rgb_pixel[2], alpha_pixel[0]]),
+            );
+        }
+    }
+    rgba
+}
+
+fn unsupported_image_format(img: &DynamicImage) -> Error {
+    Error::UnsupportedImageFormat(format!("{:?}", img.color()))
 }
 
 #[cfg(test)]

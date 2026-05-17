@@ -23,6 +23,10 @@ pub enum Error {
     #[error("unknown model '{0}'")]
     UnknownModel(String),
 
+    /// The input image format is not supported by the current image pipeline.
+    #[error("unsupported image format: {0}")]
+    UnsupportedImageFormat(String),
+
     /// The lens calibration has no entries for the requested correction type.
     #[error("no calibration data available for {0}")]
     NoCalibration(String),
