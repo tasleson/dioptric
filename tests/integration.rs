@@ -15,6 +15,14 @@ fn profile_for(
         .build()
 }
 
+fn canon_5d_24_70(db: &Database) -> (&dioptric::database::Camera, &dioptric::database::Lens) {
+    let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
+    let lens = db
+        .find_lens_for_camera(camera, "Canon", "EF 24-70mm f/2.8L II USM")
+        .unwrap();
+    (camera, lens)
+}
+
 // ── Database loading ───────────────────────────────────────────────────────────
 
 #[test]
@@ -39,7 +47,8 @@ fn find_canon_camera() {
 #[test]
 fn find_canon_lens() {
     let db = Database::bundled();
-    let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM");
+    let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
+    let lens = db.find_lens_for_camera(camera, "Canon", "EF 24-70mm f/2.8L II USM");
     assert!(
         lens.is_some(),
         "Canon EF 24-70mm f/2.8L II USM must be findable"
@@ -77,8 +86,7 @@ fn load_xml_public_api_returns_parse_error_for_invalid_xml() {
 #[test]
 fn profile_for_known_lens() {
     let db = Database::bundled();
-    let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
-    let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
+    let (camera, lens) = canon_5d_24_70(&db);
     let profile = CorrectionProfile::builder(lens)
         .camera(camera)
         .focal_length(35.0)
@@ -93,7 +101,7 @@ fn profile_for_known_lens() {
 #[test]
 fn profile_builder_reports_missing_parameters() {
     let db = Database::bundled();
-    let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
+    let (_, lens) = canon_5d_24_70(&db);
     let err = CorrectionProfile::builder(lens)
         .focal_length(35.0)
         .aperture(4.0)
@@ -107,7 +115,7 @@ fn profile_builder_reports_missing_parameters() {
 #[test]
 fn profile_invalid_focal_returns_error() {
     let db = Database::bundled();
-    let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
+    let (_, lens) = canon_5d_24_70(&db);
     let result = profile_for(lens, 1.0, -10.0, 4.0, 10.0);
     assert!(result.is_err());
 }
@@ -115,7 +123,7 @@ fn profile_invalid_focal_returns_error() {
 #[test]
 fn profile_invalid_aperture_returns_error() {
     let db = Database::bundled();
-    let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
+    let (_, lens) = canon_5d_24_70(&db);
     let result = profile_for(lens, 1.0, 35.0, 0.0, 10.0);
     assert!(result.is_err());
 }
@@ -496,8 +504,7 @@ mod image_tests {
     #[test]
     fn correct_all_preserves_dimensions() {
         let db = Database::bundled();
-        let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
-        let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
+        let (camera, lens) = canon_5d_24_70(&db);
         let profile = profile_for(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
 
         let img = test_image(64, 48, [180, 120, 80]);
@@ -508,8 +515,7 @@ mod image_tests {
     #[test]
     fn correct_distortion_preserves_dimensions() {
         let db = Database::bundled();
-        let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
-        let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
+        let (camera, lens) = canon_5d_24_70(&db);
         let profile = profile_for(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
 
         let img = test_image(64, 48, [128, 64, 32]);
@@ -520,8 +526,7 @@ mod image_tests {
     #[test]
     fn correct_tca_preserves_dimensions() {
         let db = Database::bundled();
-        let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
-        let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
+        let (camera, lens) = canon_5d_24_70(&db);
         let profile = profile_for(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
 
         let img = test_image(64, 48, [200, 150, 100]);
@@ -532,8 +537,7 @@ mod image_tests {
     #[test]
     fn vignetting_brightens_uniform_white_at_centre() {
         let db = Database::bundled();
-        let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
-        let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
+        let (camera, lens) = canon_5d_24_70(&db);
         let profile = profile_for(lens, camera.crop_factor(), 24.0, 2.8, 10.0).unwrap();
 
         if profile.vignetting().is_none() {
@@ -560,8 +564,7 @@ mod image_tests {
         use image::Rgba;
 
         let db = Database::bundled();
-        let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
-        let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
+        let (camera, lens) = canon_5d_24_70(&db);
         let profile = profile_for(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
 
         let img = DynamicImage::ImageRgba8(RgbaImage::from_pixel(32, 24, Rgba([10, 20, 30, 77])));
@@ -573,8 +576,7 @@ mod image_tests {
     #[test]
     fn grayscale_inputs_return_an_error() {
         let db = Database::bundled();
-        let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
-        let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
+        let (camera, lens) = canon_5d_24_70(&db);
         let profile = profile_for(lens, camera.crop_factor(), 35.0, 4.0, 10.0).unwrap();
 
         let img =

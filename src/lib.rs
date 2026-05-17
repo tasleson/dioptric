@@ -84,9 +84,10 @@
 //!
 //! ## Database lookup
 //!
-//! [`Database::find_camera`] and [`Database::find_lens`] return the first
-//! match; [`Database::find_cameras`] and [`Database::find_lenses`] return
-//! iterators over all matches. [`Database::find_lens_for_camera`] and
+//! [`Database::find_camera`] returns the first camera match.
+//! [`Database::find_cameras`], [`Database::find_lenses`], and
+//! [`Database::find_lenses_by_name`] return iterators over all non-camera-aware
+//! matches. [`Database::find_lens_for_camera`] and
 //! [`Database::find_lens_by_name_for_camera`] use camera mount and crop factor
 //! to rank duplicate lens profiles.
 //! [`Database::find_lenses_for_camera`] and
@@ -95,10 +96,9 @@
 //! All lookup methods perform case-insensitive substring matching, so EXIF
 //! strings rarely need to match exactly.
 //!
-//! [`Database::find_lens_by_name`] and [`Database::find_lenses_by_name`]
-//! accept a single query string matched against the combined `"maker model"`
-//! text — useful when only an EXIF `LensModel` field is available without a
-//! separate maker.
+//! [`Database::find_lenses_by_name`] accepts a single query string matched
+//! against the combined `"maker model"` text — useful when only an EXIF
+//! `LensModel` field is available without a separate maker.
 
 pub mod correction;
 pub mod database;

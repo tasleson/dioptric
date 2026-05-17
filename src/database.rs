@@ -638,30 +638,14 @@ impl Database {
         })
     }
 
-    /// Find a lens by maker and model using case-insensitive substring matching,
-    /// with a fallback that ignores punctuation and whitespace.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// let db = dioptric::Database::bundled();
-    /// let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM");
-    /// assert!(lens.is_some());
-    /// ```
-    pub fn find_lens(&self, maker_query: &str, model_query: &str) -> Option<&Lens> {
-        self.lenses.iter().find(|l| {
-            fuzzy_contains(&l.maker, maker_query) && fuzzy_contains(&l.model, model_query)
-        })
-    }
-
     /// Find the best lens match for a specific camera.
     ///
-    /// Candidate lenses are matched by maker and model like [`Self::find_lens`],
-    /// then filtered to lenses whose mount is compatible with the camera. When
-    /// the database has duplicate same-name lens entries, this ranks exact mount
-    /// matches ahead of entries with missing mount data, then prefers the lens
-    /// crop factor closest to the camera crop factor. Calibration coverage is
-    /// used as a final tie-breaker.
+    /// Candidate lenses are matched by maker and model using case-insensitive
+    /// substring matching, then filtered to lenses whose mount is compatible
+    /// with the camera. When the database has duplicate same-name lens entries,
+    /// this ranks exact mount matches ahead of entries with missing mount data,
+    /// then prefers the lens crop factor closest to the camera crop factor.
+    /// Calibration coverage is used as a final tie-breaker.
     ///
     /// # Example
     ///
@@ -753,31 +737,9 @@ impl Database {
         })
     }
 
-    /// Find a lens using a single query string, matched against the
-    /// combined `"maker model"` text using case-insensitive substring
-    /// matching, with a fallback that ignores punctuation and whitespace.
-    ///
-    /// This is useful when the caller only has a single lens description
-    /// string (e.g. an EXIF `LensModel` field) without a separate maker.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// let db = dioptric::Database::bundled();
-    /// let lens = db.find_lens_by_name("Canon EF 24-70mm f/2.8L II USM");
-    /// assert!(lens.is_some());
-    /// ```
-    pub fn find_lens_by_name(&self, query: &str) -> Option<&Lens> {
-        self.lenses.iter().find(|l| {
-            let full = format!("{} {}", l.maker, l.model);
-            fuzzy_contains(&full, query)
-        })
-    }
-
     /// Find the best single-string lens match for a specific camera.
     ///
-    /// This is the camera-aware variant of [`Self::find_lens_by_name`]. It is
-    /// useful when EXIF metadata provides a camera body plus a single
+    /// This is useful when EXIF metadata provides a camera body plus a single
     /// `LensModel` value without a separate lens maker field.
     pub fn find_lens_by_name_for_camera(&self, camera: &Camera, query: &str) -> Option<&Lens> {
         self.find_lenses_by_name_for_camera(camera, query)
@@ -1171,7 +1133,10 @@ mod tests {
 
         let mut db = Database::empty();
         db.load_xml(xml).expect("parse should succeed");
-        let lens = db.find_lens("Acme", "Zoom").expect("lens should load");
+        let lens = db
+            .find_lenses("Acme", "Zoom")
+            .next()
+            .expect("lens should load");
         assert_eq!(lens.calibration.distortions.len(), 2);
         assert_eq!(lens.calibration.tcas.len(), 2);
         assert_eq!(lens.calibration.vignettings.len(), 2);
@@ -1194,7 +1159,10 @@ mod tests {
 
         let mut db = Database::empty();
         db.load_xml(xml).expect("parse should succeed");
-        let lens = db.find_lens("Acme", "TCA").expect("lens should load");
+        let lens = db
+            .find_lenses("Acme", "TCA")
+            .next()
+            .expect("lens should load");
 
         match lens.calibration.tcas[0].model {
             TcaModel::Poly3(params) => {
@@ -1235,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn find_lens_by_name_single_string() {
+    fn find_lenses_by_name_single_string() {
         let xml = r#"<lensdatabase version="2">
   <lens>
     <maker>Canon</maker>
@@ -1254,21 +1222,25 @@ mod tests {
         db.load_xml(xml).unwrap();
 
         // Match against combined "maker model"
-        assert!(db.find_lens_by_name("Canon EF 24-70").is_some());
-        assert!(db.find_lens_by_name("Nikon AF-S 70-200").is_some());
+        assert!(db.find_lenses_by_name("Canon EF 24-70").next().is_some());
+        assert!(db.find_lenses_by_name("Nikon AF-S 70-200").next().is_some());
 
         // Case-insensitive
-        assert!(db.find_lens_by_name("canon ef 24-70").is_some());
+        assert!(db.find_lenses_by_name("canon ef 24-70").next().is_some());
 
         // Partial model-only match (model contains the substring)
-        assert!(db.find_lens_by_name("24-70mm").is_some());
+        assert!(db.find_lenses_by_name("24-70mm").next().is_some());
 
         // EXIF strings often omit spaces or punctuation found in lensfun names.
-        assert!(db.find_lens("Canon", "EF24-70mm").is_some());
-        assert!(db.find_lens_by_name("Canon EF24-70mm f28L").is_some());
+        assert!(db.find_lenses("Canon", "EF24-70mm").next().is_some());
+        assert!(
+            db.find_lenses_by_name("Canon EF24-70mm f28L")
+                .next()
+                .is_some()
+        );
 
         // No match
-        assert!(db.find_lens_by_name("Sigma 50mm").is_none());
+        assert!(db.find_lenses_by_name("Sigma 50mm").next().is_none());
     }
 
     #[test]
@@ -1312,7 +1284,7 @@ mod tests {
         let full_frame = db.find_camera("Canon", "Full Frame").unwrap();
         let aps_c = db.find_camera("Canon", "APS-C").unwrap();
 
-        let first = db.find_lens("Canon", "EF35mm f2").unwrap();
+        let first = db.find_lenses("Canon", "EF35mm f2").next().unwrap();
         assert_eq!(first.crop_factor, Some(1.6));
 
         let full_frame_lens = db
@@ -1362,7 +1334,7 @@ mod tests {
         db.load_xml(xml).unwrap();
         let camera = db.find_camera("Canon", "Body").unwrap();
 
-        let first = db.find_lens("Sigma", "50mm").unwrap();
+        let first = db.find_lenses("Sigma", "50mm").next().unwrap();
         assert_eq!(first.mounts, vec!["Nikon F".to_owned()]);
 
         let camera_lens = db.find_lens_for_camera(camera, "Sigma", "50mm").unwrap();

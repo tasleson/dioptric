@@ -72,10 +72,17 @@ dioptric/
 
 ```rust
 let db = Database::bundled();
-let lens   = db.find_lens("Canon", "Canon EF 24-70mm f/2.8L II USM").ok_or(...)?;
 let camera = db.find_camera("Canon", "Canon EOS 5D Mark III").ok_or(...)?;
+let lens = db
+    .find_lens_for_camera(camera, "Canon", "Canon EF 24-70mm f/2.8L II USM")
+    .ok_or(...)?;
 
-let profile = CorrectionProfile::new(lens, camera.crop_factor(), 24.0, 2.8, 10.0)?;
+let profile = CorrectionProfile::builder(lens)
+    .camera(camera)
+    .focal_length(24.0)
+    .aperture(2.8)
+    .distance(10.0)
+    .build()?;
 
 let corrected = profile.correct_all(&img)?;          // all three corrections
 let corrected = profile.correct_distortion(&img)?;   // distortion only

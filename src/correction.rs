@@ -254,8 +254,10 @@ impl<'a> CorrectionProfileBuilder<'a> {
 /// use dioptric::{Database, CorrectionProfile};
 ///
 /// let db = Database::bundled();
-/// let lens = db.find_lens("Canon", "EF 24-70mm f/2.8L II USM").unwrap();
 /// let camera = db.find_camera("Canon", "EOS 5D Mark III").unwrap();
+/// let lens = db
+///     .find_lens_for_camera(camera, "Canon", "EF 24-70mm f/2.8L II USM")
+///     .unwrap();
 /// let profile = CorrectionProfile::builder(lens)
 ///     .camera(camera)
 ///     .focal_length(35.0)
@@ -312,8 +314,8 @@ impl CorrectionProfile {
     /// use dioptric::{Database, CorrectionProfile};
     ///
     /// let db = Database::bundled();
-    /// let lens = db.find_lens("Canon", "EF 24-70").unwrap();
     /// let camera = db.find_camera("Canon", "5D Mark III").unwrap();
+    /// let lens = db.find_lens_for_camera(camera, "Canon", "EF 24-70").unwrap();
     /// let profile = CorrectionProfile::builder(lens)
     ///     .camera(camera)
     ///     .focal_length(24.0)
