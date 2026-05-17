@@ -34,7 +34,7 @@ let profile = CorrectionProfile::builder(lens)
 
 | Method | Description |
 |--------|-------------|
-| `CorrectionProfile::correct_all` | Distortion + TCA + vignetting |
+| `CorrectionProfile::correct_all` | Vignetting, then composed distortion + TCA |
 | `CorrectionProfile::correct_distortion` | Geometric warp only |
 | `CorrectionProfile::correct_vignetting` | In-place brightness correction |
 | `CorrectionProfile::correct_tca` | Per-channel warp only |
@@ -42,7 +42,7 @@ let profile = CorrectionProfile::builder(lens)
 For raw-processor integrations, `CorrectionProfile::distortion_coordinate_map`
 and `CorrectionProfile::tca_coordinate_map` expose source-coordinate maps for
 callers that own their resampling pipeline. `CorrectionOptions` provides
-stage selection and Lensfun-style color-first ordering via the
+stage selection while preserving Lensfun-style color-first ordering via the
 `correct_with_options_raw*` methods. `CoordinateMapOptions::reverse(true)`
 matches Lensfun's reverse-transform terminology.
 

@@ -37,7 +37,7 @@
 //!
 //! | Method | Description |
 //! |--------|-------------|
-//! | [`CorrectionProfile::correct_all_raw`] | Distortion + TCA + vignetting |
+//! | [`CorrectionProfile::correct_all_raw`] | Vignetting, then composed distortion + TCA |
 //! | [`CorrectionProfile::correct_distortion_raw`] | Geometric warp only |
 //! | [`CorrectionProfile::correct_vignetting_raw`] | In-place brightness correction |
 //! | [`CorrectionProfile::correct_tca_raw`] | Per-channel warp only |
@@ -48,7 +48,7 @@
 //!
 //! | Method | Description |
 //! |--------|-------------|
-//! | [`CorrectionProfile::correct_all_raw_u16`] | Distortion + TCA + vignetting |
+//! | [`CorrectionProfile::correct_all_raw_u16`] | Vignetting, then composed distortion + TCA |
 //! | [`CorrectionProfile::correct_distortion_raw_u16`] | Geometric warp only |
 //! | [`CorrectionProfile::correct_vignetting_raw_u16`] | In-place brightness correction |
 //! | [`CorrectionProfile::correct_tca_raw_u16`] | Per-channel warp only |
@@ -58,7 +58,7 @@
 //!
 //! | Method | Description |
 //! |--------|-------------|
-//! | [`CorrectionProfile::correct_all_raw_f32`] | Distortion + TCA + vignetting |
+//! | [`CorrectionProfile::correct_all_raw_f32`] | Vignetting, then composed distortion + TCA |
 //! | [`CorrectionProfile::correct_distortion_raw_f32`] | Geometric warp only |
 //! | [`CorrectionProfile::correct_vignetting_raw_f32`] | In-place brightness correction |
 //! | [`CorrectionProfile::correct_tca_raw_f32`] | Per-channel warp only |
@@ -68,7 +68,7 @@
 //!
 //! | Method | Description |
 //! |--------|-------------|
-//! | [`CorrectionProfile::correct_all`] | Distortion + TCA + vignetting |
+//! | [`CorrectionProfile::correct_all`] | Vignetting, then composed distortion + TCA |
 //! | [`CorrectionProfile::correct_distortion`] | Geometric warp only |
 //! | [`CorrectionProfile::correct_vignetting`] | In-place brightness correction |
 //! | [`CorrectionProfile::correct_tca`] | Per-channel warp only |
@@ -79,7 +79,8 @@
 //! [`CorrectionProfile::distortion_coordinate_map`] and
 //! [`CorrectionProfile::tca_coordinate_map`] to feed their own resampling
 //! pipeline, or [`CorrectionOptions`] with `correct_with_options_raw*` methods
-//! to choose stages and Lensfun-style color-first ordering.
+//! to disable selected stages while preserving Lensfun-style color-first
+//! ordering.
 //! [`CoordinateMapOptions::reverse`] matches Lensfun's reverse-transform flag.
 //!
 //! ## Database lookup
@@ -107,7 +108,7 @@ pub mod models;
 
 pub use correction::{
     Coordinate, CoordinateMapOptions, CorrectionOptions, CorrectionProfile,
-    CorrectionProfileBuilder, PipelineOrder, SubpixelCoordinates, TransformMode,
+    CorrectionProfileBuilder, SubpixelCoordinates, TransformMode,
 };
 pub use database::{Database, LensMatch, LensMountMatch, MountCompatibility};
 pub use error::{Error, Result};

@@ -98,15 +98,6 @@ impl CoordinateMapOptions {
     }
 }
 
-/// Correction stage ordering for [`CorrectionOptions`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PipelineOrder {
-    /// Lensfun-style order: color correction first, then coordinate warps.
-    ColorFirst,
-    /// Legacy order used by the original `correct_all_*` helpers.
-    GeometryFirst,
-}
-
 /// Options for opt-in high-level correction methods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CorrectionOptions {
@@ -116,8 +107,6 @@ pub struct CorrectionOptions {
     tca: bool,
     /// Apply vignetting correction.
     vignetting: bool,
-    /// Stage order.
-    pipeline_order: PipelineOrder,
 }
 
 impl Default for CorrectionOptions {
@@ -126,7 +115,6 @@ impl Default for CorrectionOptions {
             distortion: true,
             tca: true,
             vignetting: true,
-            pipeline_order: PipelineOrder::ColorFirst,
         }
     }
 }
@@ -151,11 +139,6 @@ impl CorrectionOptions {
         self
     }
 
-    pub fn with_pipeline_order(mut self, pipeline_order: PipelineOrder) -> Self {
-        self.pipeline_order = pipeline_order;
-        self
-    }
-
     pub fn distortion_enabled(&self) -> bool {
         self.distortion
     }
@@ -166,10 +149,6 @@ impl CorrectionOptions {
 
     pub fn vignetting_enabled(&self) -> bool {
         self.vignetting
-    }
-
-    pub fn pipeline_order(&self) -> PipelineOrder {
-        self.pipeline_order
     }
 }
 
@@ -369,8 +348,12 @@ impl CorrectionProfile {
 
     // ── Raw-slice public API ────────────────────────────────────────────
 
-    /// Apply distortion, TCA, and vignetting corrections in sequence to raw
-    /// pixel data, returning a new buffer.
+    /// Apply all available corrections to raw pixel data, returning a new
+    /// buffer.
+    ///
+    /// Vignetting is corrected first in color space. Distortion and TCA are
+    /// then composed into a single geometry resampling pass when both are
+    /// available.
     ///
     /// `src` must be row-major `[R,G,B,…]` with no padding.  `channels` must
     /// be 3 (RGB) or 4 (RGBA); the buffer length must equal
@@ -382,11 +365,7 @@ impl CorrectionProfile {
         channels: u32,
         src: &[u8],
     ) -> Result<Vec<u8>> {
-        validate_buffer(width, height, channels, src.len())?;
-        let after_dist = self.warp_distortion_raw(src, width, height, channels)?;
-        let mut after_tca = self.warp_tca_raw(&after_dist, width, height, channels)?;
-        self.correct_vignetting_raw_inplace(&mut after_tca, width, height, channels);
-        Ok(after_tca)
+        self.correct_with_options_raw(width, height, channels, src, CorrectionOptions::new())
     }
 
     /// Apply distortion correction only to raw pixel data, returning a new
@@ -440,8 +419,12 @@ impl CorrectionProfile {
 
     // ── u16 linear raw-slice public API ──────────────────────────────────
 
-    /// Apply distortion, TCA, and vignetting corrections in sequence to u16
-    /// linear pixel data, returning a new buffer.
+    /// Apply all available corrections to u16 linear pixel data, returning a
+    /// new buffer.
+    ///
+    /// Vignetting is corrected first in color space. Distortion and TCA are
+    /// then composed into a single geometry resampling pass when both are
+    /// available.
     ///
     /// `src` must be row-major `[R,G,B,…]` with no padding.  `channels` must
     /// be 3 (RGB) or 4 (RGBA); the buffer length must equal
@@ -454,11 +437,7 @@ impl CorrectionProfile {
         channels: u32,
         src: &[u16],
     ) -> Result<Vec<u16>> {
-        validate_buffer_u16(width, height, channels, src.len())?;
-        let after_dist = self.warp_distortion_raw_u16(src, width, height, channels)?;
-        let mut after_tca = self.warp_tca_raw_u16(&after_dist, width, height, channels)?;
-        self.correct_vignetting_raw_u16_inplace(&mut after_tca, width, height, channels);
-        Ok(after_tca)
+        self.correct_with_options_raw_u16(width, height, channels, src, CorrectionOptions::new())
     }
 
     /// Apply distortion correction only to u16 linear pixel data, returning a
@@ -512,8 +491,12 @@ impl CorrectionProfile {
 
     // ── f32 linear raw-slice public API ───────────────────────────────────
 
-    /// Apply distortion, TCA, and vignetting corrections in sequence to f32
-    /// linear pixel data, returning a new buffer.
+    /// Apply all available corrections to f32 linear pixel data, returning a
+    /// new buffer.
+    ///
+    /// Vignetting is corrected first in color space. Distortion and TCA are
+    /// then composed into a single geometry resampling pass when both are
+    /// available.
     ///
     /// `src` must be row-major `[R,G,B,…]` with no padding.  `channels` must
     /// be 3 (RGB) or 4 (RGBA); the buffer length must equal
@@ -526,11 +509,7 @@ impl CorrectionProfile {
         channels: u32,
         src: &[f32],
     ) -> Result<Vec<f32>> {
-        validate_buffer_f32(width, height, channels, src.len())?;
-        let after_dist = self.warp_distortion_raw_f32(src, width, height, channels)?;
-        let mut after_tca = self.warp_tca_raw_f32(&after_dist, width, height, channels)?;
-        self.correct_vignetting_raw_f32_inplace(&mut after_tca, width, height, channels);
-        Ok(after_tca)
+        self.correct_with_options_raw_f32(width, height, channels, src, CorrectionOptions::new())
     }
 
     /// Apply distortion correction only to f32 linear pixel data, returning a
@@ -587,9 +566,10 @@ impl CorrectionProfile {
     /// Apply selected corrections to raw `u8` pixel data using
     /// [`CorrectionOptions`].
     ///
-    /// This method is useful when callers need Lensfun-style color-first
-    /// ordering or want to disable individual stages without manually
-    /// sequencing the lower-level methods.
+    /// This method is useful when callers want to disable individual stages
+    /// without manually sequencing the lower-level methods. Enabled stages use
+    /// Lensfun-style color-first ordering and compose distortion/TCA into a
+    /// single geometry resampling pass when both are enabled.
     pub fn correct_with_options_raw(
         &self,
         width: u32,
@@ -600,31 +580,17 @@ impl CorrectionProfile {
     ) -> Result<Vec<u8>> {
         validate_buffer(width, height, channels, src.len())?;
         let mut current = src.to_vec();
-        match options.pipeline_order {
-            PipelineOrder::ColorFirst => {
-                if options.vignetting {
-                    self.correct_vignetting_raw_inplace(&mut current, width, height, channels);
-                }
-                if options.distortion {
-                    current = self.warp_distortion_raw(&current, width, height, channels)?;
-                }
-                if options.tca {
-                    current = self.warp_tca_raw(&current, width, height, channels)?;
-                }
-            }
-            PipelineOrder::GeometryFirst => {
-                if options.distortion {
-                    current = self.warp_distortion_raw(&current, width, height, channels)?;
-                }
-                if options.tca {
-                    current = self.warp_tca_raw(&current, width, height, channels)?;
-                }
-                if options.vignetting {
-                    self.correct_vignetting_raw_inplace(&mut current, width, height, channels);
-                }
-            }
+        if options.vignetting {
+            self.correct_vignetting_raw_inplace(&mut current, width, height, channels);
         }
-        Ok(current)
+        self.correct_geometry_raw(
+            &current,
+            width,
+            height,
+            channels,
+            options.distortion,
+            options.tca,
+        )
     }
 
     /// Apply selected corrections to linear `u16` pixel data using
@@ -639,31 +605,17 @@ impl CorrectionProfile {
     ) -> Result<Vec<u16>> {
         validate_buffer_u16(width, height, channels, src.len())?;
         let mut current = src.to_vec();
-        match options.pipeline_order {
-            PipelineOrder::ColorFirst => {
-                if options.vignetting {
-                    self.correct_vignetting_raw_u16_inplace(&mut current, width, height, channels);
-                }
-                if options.distortion {
-                    current = self.warp_distortion_raw_u16(&current, width, height, channels)?;
-                }
-                if options.tca {
-                    current = self.warp_tca_raw_u16(&current, width, height, channels)?;
-                }
-            }
-            PipelineOrder::GeometryFirst => {
-                if options.distortion {
-                    current = self.warp_distortion_raw_u16(&current, width, height, channels)?;
-                }
-                if options.tca {
-                    current = self.warp_tca_raw_u16(&current, width, height, channels)?;
-                }
-                if options.vignetting {
-                    self.correct_vignetting_raw_u16_inplace(&mut current, width, height, channels);
-                }
-            }
+        if options.vignetting {
+            self.correct_vignetting_raw_u16_inplace(&mut current, width, height, channels);
         }
-        Ok(current)
+        self.correct_geometry_raw_u16(
+            &current,
+            width,
+            height,
+            channels,
+            options.distortion,
+            options.tca,
+        )
     }
 
     /// Apply selected corrections to linear `f32` pixel data using
@@ -678,31 +630,17 @@ impl CorrectionProfile {
     ) -> Result<Vec<f32>> {
         validate_buffer_f32(width, height, channels, src.len())?;
         let mut current = src.to_vec();
-        match options.pipeline_order {
-            PipelineOrder::ColorFirst => {
-                if options.vignetting {
-                    self.correct_vignetting_raw_f32_inplace(&mut current, width, height, channels);
-                }
-                if options.distortion {
-                    current = self.warp_distortion_raw_f32(&current, width, height, channels)?;
-                }
-                if options.tca {
-                    current = self.warp_tca_raw_f32(&current, width, height, channels)?;
-                }
-            }
-            PipelineOrder::GeometryFirst => {
-                if options.distortion {
-                    current = self.warp_distortion_raw_f32(&current, width, height, channels)?;
-                }
-                if options.tca {
-                    current = self.warp_tca_raw_f32(&current, width, height, channels)?;
-                }
-                if options.vignetting {
-                    self.correct_vignetting_raw_f32_inplace(&mut current, width, height, channels);
-                }
-            }
+        if options.vignetting {
+            self.correct_vignetting_raw_f32_inplace(&mut current, width, height, channels);
         }
-        Ok(current)
+        self.correct_geometry_raw_f32(
+            &current,
+            width,
+            height,
+            channels,
+            options.distortion,
+            options.tca,
+        )
     }
 
     /// Build a distortion source-coordinate map for every output pixel.
@@ -807,13 +745,21 @@ impl CorrectionProfile {
         py: u32,
         options: CoordinateMapOptions,
     ) -> Coordinate {
+        self.distortion_source_coordinate_at(w, h, px as f32, py as f32, options)
+    }
+
+    fn distortion_source_coordinate_at(
+        &self,
+        w: u32,
+        h: u32,
+        x: f32,
+        y: f32,
+        options: CoordinateMapOptions,
+    ) -> Coordinate {
         let model = match self.distortion {
             Some(model) => model,
             None => {
-                return Coordinate {
-                    x: px as f32,
-                    y: py as f32,
-                };
+                return Coordinate { x, y };
             }
         };
 
@@ -821,8 +767,8 @@ impl CorrectionProfile {
         let norm = normalisation_factor(wf, hf, self.crop_factor) * options.scale;
         let cx = wf * 0.5;
         let cy = hf * 0.5;
-        let xn = (px as f32 - cx) / norm;
-        let yn = (py as f32 - cy) / norm;
+        let xn = (x - cx) / norm;
+        let yn = (y - cy) / norm;
         let r = (xn * xn + yn * yn).sqrt();
         let mapped_r = match options.transform_mode {
             TransformMode::Rectify => model.undistorted_to_distorted(r),
@@ -880,6 +826,232 @@ impl CorrectionProfile {
                 y: yn * blue_scale * norm + cy,
             },
         }
+    }
+
+    fn correct_geometry_raw(
+        &self,
+        src: &[u8],
+        width: u32,
+        height: u32,
+        channels: u32,
+        distortion: bool,
+        tca: bool,
+    ) -> Result<Vec<u8>> {
+        match (
+            distortion && self.distortion.is_some(),
+            tca && self.tca.is_some(),
+        ) {
+            (true, true) => self.warp_distortion_and_tca_raw(src, width, height, channels),
+            (true, false) => self.warp_distortion_raw(src, width, height, channels),
+            (false, true) => self.warp_tca_raw(src, width, height, channels),
+            (false, false) => Ok(src.to_vec()),
+        }
+    }
+
+    fn correct_geometry_raw_u16(
+        &self,
+        src: &[u16],
+        width: u32,
+        height: u32,
+        channels: u32,
+        distortion: bool,
+        tca: bool,
+    ) -> Result<Vec<u16>> {
+        match (
+            distortion && self.distortion.is_some(),
+            tca && self.tca.is_some(),
+        ) {
+            (true, true) => self.warp_distortion_and_tca_raw_u16(src, width, height, channels),
+            (true, false) => self.warp_distortion_raw_u16(src, width, height, channels),
+            (false, true) => self.warp_tca_raw_u16(src, width, height, channels),
+            (false, false) => Ok(src.to_vec()),
+        }
+    }
+
+    fn correct_geometry_raw_f32(
+        &self,
+        src: &[f32],
+        width: u32,
+        height: u32,
+        channels: u32,
+        distortion: bool,
+        tca: bool,
+    ) -> Result<Vec<f32>> {
+        match (
+            distortion && self.distortion.is_some(),
+            tca && self.tca.is_some(),
+        ) {
+            (true, true) => self.warp_distortion_and_tca_raw_f32(src, width, height, channels),
+            (true, false) => self.warp_distortion_raw_f32(src, width, height, channels),
+            (false, true) => self.warp_tca_raw_f32(src, width, height, channels),
+            (false, false) => Ok(src.to_vec()),
+        }
+    }
+
+    fn composed_source_coordinates(&self, w: u32, h: u32, px: u32, py: u32) -> SubpixelCoordinates {
+        let tca = self.tca_source_coordinates(w, h, px, py, CoordinateMapOptions::default());
+        SubpixelCoordinates {
+            red: self.distortion_source_coordinate_at(
+                w,
+                h,
+                tca.red.x,
+                tca.red.y,
+                CoordinateMapOptions::default(),
+            ),
+            green: self.distortion_source_coordinate_at(
+                w,
+                h,
+                tca.green.x,
+                tca.green.y,
+                CoordinateMapOptions::default(),
+            ),
+            blue: self.distortion_source_coordinate_at(
+                w,
+                h,
+                tca.blue.x,
+                tca.blue.y,
+                CoordinateMapOptions::default(),
+            ),
+        }
+    }
+
+    fn warp_distortion_and_tca_raw(&self, src: &[u8], w: u32, h: u32, ch: u32) -> Result<Vec<u8>> {
+        let ch = ch as usize;
+        let wi = w as i32;
+        let hi = h as i32;
+        let stride = w as usize * ch;
+        let mut dst = vec![0u8; src.len()];
+
+        for py in 0..h {
+            for px in 0..w {
+                let coords = self.composed_source_coordinates(w, h, px, py);
+                let dst_idx = py as usize * stride + px as usize * ch;
+                dst[dst_idx] =
+                    bilinear_sample_channel_raw(src, wi, hi, ch, coords.red.x, coords.red.y, 0);
+                dst[dst_idx + 1] =
+                    bilinear_sample_channel_raw(src, wi, hi, ch, coords.green.x, coords.green.y, 1);
+                dst[dst_idx + 2] =
+                    bilinear_sample_channel_raw(src, wi, hi, ch, coords.blue.x, coords.blue.y, 2);
+                if ch == 4 {
+                    dst[dst_idx + 3] = bilinear_sample_channel_raw(
+                        src,
+                        wi,
+                        hi,
+                        ch,
+                        coords.green.x,
+                        coords.green.y,
+                        3,
+                    );
+                }
+            }
+        }
+        Ok(dst)
+    }
+
+    fn warp_distortion_and_tca_raw_u16(
+        &self,
+        src: &[u16],
+        w: u32,
+        h: u32,
+        ch: u32,
+    ) -> Result<Vec<u16>> {
+        let ch = ch as usize;
+        let wi = w as i32;
+        let hi = h as i32;
+        let stride = w as usize * ch;
+        let mut dst = vec![0u16; src.len()];
+
+        for py in 0..h {
+            for px in 0..w {
+                let coords = self.composed_source_coordinates(w, h, px, py);
+                let dst_idx = py as usize * stride + px as usize * ch;
+                dst[dst_idx] =
+                    bilinear_sample_channel_raw_u16(src, wi, hi, ch, coords.red.x, coords.red.y, 0);
+                dst[dst_idx + 1] = bilinear_sample_channel_raw_u16(
+                    src,
+                    wi,
+                    hi,
+                    ch,
+                    coords.green.x,
+                    coords.green.y,
+                    1,
+                );
+                dst[dst_idx + 2] = bilinear_sample_channel_raw_u16(
+                    src,
+                    wi,
+                    hi,
+                    ch,
+                    coords.blue.x,
+                    coords.blue.y,
+                    2,
+                );
+                if ch == 4 {
+                    dst[dst_idx + 3] = bilinear_sample_channel_raw_u16(
+                        src,
+                        wi,
+                        hi,
+                        ch,
+                        coords.green.x,
+                        coords.green.y,
+                        3,
+                    );
+                }
+            }
+        }
+        Ok(dst)
+    }
+
+    fn warp_distortion_and_tca_raw_f32(
+        &self,
+        src: &[f32],
+        w: u32,
+        h: u32,
+        ch: u32,
+    ) -> Result<Vec<f32>> {
+        let ch = ch as usize;
+        let wi = w as i32;
+        let hi = h as i32;
+        let stride = w as usize * ch;
+        let mut dst = vec![0.0f32; src.len()];
+
+        for py in 0..h {
+            for px in 0..w {
+                let coords = self.composed_source_coordinates(w, h, px, py);
+                let dst_idx = py as usize * stride + px as usize * ch;
+                dst[dst_idx] =
+                    bilinear_sample_channel_raw_f32(src, wi, hi, ch, coords.red.x, coords.red.y, 0);
+                dst[dst_idx + 1] = bilinear_sample_channel_raw_f32(
+                    src,
+                    wi,
+                    hi,
+                    ch,
+                    coords.green.x,
+                    coords.green.y,
+                    1,
+                );
+                dst[dst_idx + 2] = bilinear_sample_channel_raw_f32(
+                    src,
+                    wi,
+                    hi,
+                    ch,
+                    coords.blue.x,
+                    coords.blue.y,
+                    2,
+                );
+                if ch == 4 {
+                    dst[dst_idx + 3] = bilinear_sample_channel_raw_f32(
+                        src,
+                        wi,
+                        hi,
+                        ch,
+                        coords.green.x,
+                        coords.green.y,
+                        3,
+                    );
+                }
+            }
+        }
+        Ok(dst)
     }
 
     fn warp_distortion_raw_u16(&self, src: &[u16], w: u32, h: u32, ch: u32) -> Result<Vec<u16>> {
@@ -2207,6 +2379,150 @@ mod tests {
         assert!(
             enabled[0] > src[0],
             "enabled vignetting stage should brighten the corner"
+        );
+    }
+
+    #[test]
+    fn correct_all_uses_color_first_ordering() {
+        use crate::database::{Calibration, DistortionEntry, Lens, VignettingEntry};
+        use crate::models::{Poly3Params, VignettingParams};
+
+        let lens = Lens {
+            maker: "Test".into(),
+            model: "Color first".into(),
+            mounts: vec![],
+            crop_factor: Some(1.0),
+            calibration: Calibration {
+                distortions: vec![DistortionEntry {
+                    focal: 35.0,
+                    model: DistortionModel::Poly3(Poly3Params { k1: 0.25 }),
+                }],
+                tcas: vec![],
+                vignettings: vec![VignettingEntry {
+                    focal: 35.0,
+                    aperture: 2.0,
+                    distance: 1000.0,
+                    params: VignettingParams {
+                        k1: -0.5,
+                        k2: 0.1,
+                        k3: -0.05,
+                    },
+                }],
+            },
+        };
+        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
+        let src = vec![0.5f32; 16 * 16 * 3];
+
+        let mut color_first_input = src.clone();
+        profile
+            .correct_vignetting_raw_f32(16, 16, 3, &mut color_first_input)
+            .unwrap();
+        let color_first = profile
+            .correct_distortion_raw_f32(16, 16, 3, &color_first_input)
+            .unwrap();
+
+        let all = profile.correct_all_raw_f32(16, 16, 3, &src).unwrap();
+        assert_eq!(all, color_first);
+
+        let mut geometry_first = profile.correct_distortion_raw_f32(16, 16, 3, &src).unwrap();
+        profile
+            .correct_vignetting_raw_f32(16, 16, 3, &mut geometry_first)
+            .unwrap();
+        let max_diff = all
+            .iter()
+            .zip(&geometry_first)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_diff > 1e-6,
+            "correct_all should not apply vignetting after geometry"
+        );
+    }
+
+    #[test]
+    fn correct_all_composes_distortion_and_tca_coordinates() {
+        use crate::database::{Calibration, DistortionEntry, Lens, TcaEntry};
+        use crate::models::{Poly3Params, TcaLinearParams};
+
+        let lens = Lens {
+            maker: "Test".into(),
+            model: "Composed geometry".into(),
+            mounts: vec![],
+            crop_factor: Some(1.0),
+            calibration: Calibration {
+                distortions: vec![DistortionEntry {
+                    focal: 35.0,
+                    model: DistortionModel::Poly3(Poly3Params { k1: 0.2 }),
+                }],
+                tcas: vec![TcaEntry {
+                    focal: 35.0,
+                    model: TcaModel::Linear(TcaLinearParams { kr: 1.08, kb: 0.92 }),
+                }],
+                vignettings: vec![],
+            },
+        };
+        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 4.0, 10.0).unwrap();
+        let (w, h, ch) = (8, 8, 3);
+        let mut src = vec![0.0f32; w * h * ch];
+        for y in 0..h {
+            for x in 0..w {
+                let idx = y * w * ch + x * ch;
+                src[idx] = x as f32 / 7.0;
+                src[idx + 1] = y as f32 / 7.0;
+                src[idx + 2] = (x + y) as f32 / 14.0;
+            }
+        }
+
+        let all = profile
+            .correct_all_raw_f32(w as u32, h as u32, ch as u32, &src)
+            .unwrap();
+        let coords = profile.composed_source_coordinates(w as u32, h as u32, 1, 1);
+        let idx = (w + 1) * ch;
+        let expected_red = bilinear_sample_channel_raw_f32(
+            &src,
+            w as i32,
+            h as i32,
+            ch,
+            coords.red.x,
+            coords.red.y,
+            0,
+        );
+        let expected_green = bilinear_sample_channel_raw_f32(
+            &src,
+            w as i32,
+            h as i32,
+            ch,
+            coords.green.x,
+            coords.green.y,
+            1,
+        );
+        let expected_blue = bilinear_sample_channel_raw_f32(
+            &src,
+            w as i32,
+            h as i32,
+            ch,
+            coords.blue.x,
+            coords.blue.y,
+            2,
+        );
+
+        assert!((all[idx] - expected_red).abs() < 1e-6);
+        assert!((all[idx + 1] - expected_green).abs() < 1e-6);
+        assert!((all[idx + 2] - expected_blue).abs() < 1e-6);
+
+        let sequential = profile
+            .correct_tca_raw_f32(
+                w as u32,
+                h as u32,
+                ch as u32,
+                &profile
+                    .correct_distortion_raw_f32(w as u32, h as u32, ch as u32, &src)
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_ne!(
+            all[idx], sequential[idx],
+            "combined geometry should avoid the old second resampling pass"
         );
     }
 
