@@ -41,7 +41,7 @@ rasterlab.
 - [x] Add pipeline-level tests for TcaPoly3 TCA model
 - [x] Add a test that verifies warp actually moves pixels to the expected
       location (e.g. barrel distortion moves corner pixels inward)
-- [ ] Add a test for `from_xml` error path through the public API (not just
+- [x] Add a test for `from_xml` error path through the public API (not just
       the internal `ingest_bundled_file` helper)
 - [ ] Document the sort-by-focal-length precondition on interpolation functions,
       or make them sort internally

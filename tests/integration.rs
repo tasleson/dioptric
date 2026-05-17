@@ -47,6 +47,16 @@ fn find_missing_camera_returns_none() {
     );
 }
 
+#[test]
+fn from_xml_public_api_returns_parse_error_for_invalid_xml() {
+    let mut db = Database::empty();
+    let err = db.from_xml("<lensdatabase><camera>").unwrap_err();
+
+    assert!(matches!(err, dioptric::Error::XmlParse(_)));
+    assert_eq!(db.cameras().len(), 0);
+    assert_eq!(db.lenses().len(), 0);
+}
+
 // ── CorrectionProfile construction ────────────────────────────────────────────
 
 #[test]
