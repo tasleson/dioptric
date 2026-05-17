@@ -123,6 +123,97 @@ fn profile_uses_focus_distance_for_vignetting() {
     assert!((mid.vignetting.unwrap().k1 + 0.25).abs() < 1e-6);
 }
 
+// ── Rasterlab-shaped raw-buffer integration ─────────────────────────────────
+
+#[test]
+fn rasterlab_image_round_trip_uses_linear_raw_buffer_without_extra_pixel_copy() {
+    struct RasterlabMetadata {
+        camera_make: String,
+        camera_model: String,
+        lens_make: Option<String>,
+        lens_model: String,
+        focal_length_mm: f32,
+        aperture: f32,
+        subject_distance_m: Option<f32>,
+    }
+
+    struct RasterlabImage {
+        width: u32,
+        height: u32,
+        channels: u32,
+        metadata: RasterlabMetadata,
+        pixels: Vec<f32>,
+    }
+
+    impl RasterlabImage {
+        fn corrected_with(self, pixels: Vec<f32>) -> Self {
+            Self { pixels, ..self }
+        }
+    }
+
+    let db = Database::bundled();
+    let metadata = RasterlabMetadata {
+        camera_make: "Canon".into(),
+        camera_model: "EOS 5D Mark III".into(),
+        lens_make: Some("Canon".into()),
+        lens_model: "EF 24-70mm f/2.8L II USM".into(),
+        focal_length_mm: 35.0,
+        aperture: 4.0,
+        subject_distance_m: Some(10.0),
+    };
+
+    let width = 32;
+    let height = 24;
+    let channels = 3;
+    let pixels: Vec<f32> = (0..width * height)
+        .flat_map(|i| {
+            let x = (i % width) as f32 / width as f32;
+            let y = (i / width) as f32 / height as f32;
+            [x, y, 0.5]
+        })
+        .collect();
+    let input = RasterlabImage {
+        width,
+        height,
+        channels,
+        metadata,
+        pixels,
+    };
+
+    let camera = db
+        .find_camera(&input.metadata.camera_make, &input.metadata.camera_model)
+        .unwrap();
+    let lens = match input.metadata.lens_make.as_deref() {
+        Some(lens_make) => db.find_lens(lens_make, &input.metadata.lens_model).unwrap(),
+        None => db.find_lens_by_name(&input.metadata.lens_model).unwrap(),
+    };
+    let profile = CorrectionProfile::new(
+        lens,
+        camera.crop_factor(),
+        input.metadata.focal_length_mm,
+        input.metadata.aperture,
+        input.metadata.subject_distance_m.unwrap_or(1000.0),
+    )
+    .unwrap();
+
+    let corrected_pixels = profile
+        .correct_all_raw_f32(input.width, input.height, input.channels, &input.pixels)
+        .unwrap();
+    let corrected_ptr = corrected_pixels.as_ptr();
+    let output = input.corrected_with(corrected_pixels);
+
+    assert_eq!(output.width, width);
+    assert_eq!(output.height, height);
+    assert_eq!(output.channels, channels);
+    assert_eq!(output.metadata.lens_model, "EF 24-70mm f/2.8L II USM");
+    assert_eq!(output.pixels.len(), (width * height * channels) as usize);
+    assert_eq!(
+        output.pixels.as_ptr(),
+        corrected_ptr,
+        "corrected pixel buffer should be moved into the output image, not cloned"
+    );
+}
+
 // ── Correction smoke tests (DynamicImage API) ─────────────────────────────────
 
 #[cfg(feature = "image")]
