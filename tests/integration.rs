@@ -89,7 +89,7 @@ fn profile_uses_focus_distance_for_vignetting() {
         calibration: Calibration {
             distortions: vec![],
             tcas: vec![],
-            vignetings: vec![
+            vignettings: vec![
                 VignettingEntry {
                     focal: 35.0,
                     aperture: 2.0,
@@ -243,7 +243,7 @@ fn identity_distortion_unchanged() {
                 model: DistortionModel::Poly3(Poly3Params { k1: 0.0 }),
             }],
             tcas: vec![],
-            vignetings: vec![],
+            vignettings: vec![],
         },
     };
 
@@ -292,7 +292,7 @@ fn correct_all_applies_tca() {
                 // Non-trivial TCA: red scaled up, blue scaled down
                 model: TcaModel::Linear(TcaLinearParams { kr: 1.05, kb: 0.95 }),
             }],
-            vignetings: vec![],
+            vignettings: vec![],
         },
     };
 

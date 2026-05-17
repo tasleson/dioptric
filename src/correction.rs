@@ -95,7 +95,7 @@ impl CorrectionProfile {
         let mut tca_entries = cal.tcas.clone();
         tca_entries.sort_by(|a, b| a.focal.total_cmp(&b.focal));
 
-        let mut vig_entries = cal.vignetings.clone();
+        let mut vig_entries = cal.vignettings.clone();
         vig_entries.sort_by(|a, b| a.focal.total_cmp(&b.focal));
 
         let distortion = interpolate_distortion(&dist_entries, focal);
@@ -581,7 +581,7 @@ mod tests {
             calibration: Calibration {
                 distortions: vec![],
                 tcas: vec![],
-                vignetings: vec![VignettingEntry {
+                vignettings: vec![VignettingEntry {
                     focal: 35.0,
                     aperture: 2.0,
                     distance: 1000.0,

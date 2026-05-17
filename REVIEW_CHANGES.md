@@ -11,7 +11,7 @@ rasterlab.
       no separate `lens_make`)
 - [x] Remove the `from_xml_files` reference in the `Database` doc comment (the
       method does not exist), or implement it
-- [ ] Fix typo: `Calibration.vignetings` → `Calibration.vignettings`
+- [x] Fix typo: `Calibration.vignetings` → `Calibration.vignettings`
 
 ## Data representation
 

@@ -176,7 +176,7 @@ pub struct VignettingEntry {
 pub struct Calibration {
     pub distortions: Vec<DistortionEntry>,
     pub tcas: Vec<TcaEntry>,
-    pub vignetings: Vec<VignettingEntry>,
+    pub vignettings: Vec<VignettingEntry>,
 }
 
 /// A lens from the lensfun database.
@@ -254,7 +254,7 @@ fn convert_lens(raw: RawLens) -> Lens {
                 }
                 RawCalibrationEntry::Vignetting(v) => {
                     if v.model == "pa" {
-                        cal.vignetings.push(VignettingEntry {
+                        cal.vignettings.push(VignettingEntry {
                             focal: v.focal,
                             aperture: v.aperture,
                             distance: v.distance,
@@ -763,7 +763,7 @@ mod tests {
         let lens = db.find_lens("Acme", "Zoom").expect("lens should load");
         assert_eq!(lens.calibration.distortions.len(), 2);
         assert_eq!(lens.calibration.tcas.len(), 2);
-        assert_eq!(lens.calibration.vignetings.len(), 2);
+        assert_eq!(lens.calibration.vignettings.len(), 2);
     }
 
     #[test]
