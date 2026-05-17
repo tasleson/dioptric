@@ -1072,10 +1072,16 @@ mod tests {
         let mut data = vec![200u8; (w * h * ch) as usize];
         profile.correct_vignetting_raw(w, h, ch, &mut data).unwrap();
         let centre_idx = (32 * w as usize + 32) * ch as usize;
+        let corner_idx = 0;
         assert!(
             data[centre_idx] >= 195,
             "centre should be nearly unchanged, got {}",
             data[centre_idx]
+        );
+        assert!(
+            data[corner_idx] > 200,
+            "negative vignetting coefficients should brighten corners, got {}",
+            data[corner_idx]
         );
     }
 

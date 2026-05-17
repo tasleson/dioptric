@@ -110,7 +110,7 @@ impl DistortionModel {
 
 /// Parameters for the polynomial aperture (PA) vignetting model.
 ///
-/// `factor = 1 + k1*r² + k2*r⁴ + k3*r⁶`
+/// `factor = 1 / (1 + k1*r² + k2*r⁴ + k3*r⁶)`
 ///
 /// The factor is applied to linearised pixel values (after sRGB → linear
 /// conversion).  A factor < 1 darkens the pixel; > 1 brightens it.
@@ -128,7 +128,7 @@ impl VignettingParams {
     #[inline]
     pub fn factor(self, r: f32) -> f32 {
         let r2 = r * r;
-        1.0 + self.k1 * r2 + self.k2 * r2 * r2 + self.k3 * r2 * r2 * r2
+        1.0 / (1.0 + self.k1 * r2 + self.k2 * r2 * r2 + self.k3 * r2 * r2 * r2)
     }
 
     /// Linear interpolation between two parameter sets.
