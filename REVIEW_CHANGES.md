@@ -18,7 +18,7 @@ rasterlab.
 - [x] Add a raw-slice or trait-based correction API that operates on
       `(width, height, &mut [u8])` so callers without the `image` crate can use
       dioptric without round-trip copies
-- [ ] Support f32 linear pixel data in the correction pipeline to avoid
+- [x] Support f32 linear pixel data in the correction pipeline to avoid
       sRGB↔linear quantisation loss for callers that already work in linear
       space
 - [ ] Support 16-bit pixel data (many cameras produce 14-bit raw)
