@@ -293,7 +293,7 @@ fn convert_camera(raw: RawCamera) -> Camera {
 /// The parsed lensfun database.
 ///
 /// Load from the bundled data with [`Database::bundled`], or parse arbitrary
-/// XML with [`Database::from_xml`] and [`Database::from_xml_files`].
+/// XML with [`Database::from_xml`].
 ///
 /// # Example
 ///

@@ -9,7 +9,7 @@ rasterlab.
       matches, not just the first
 - [x] Add a single-string lens search variant (rasterlab has `lens_model` but
       no separate `lens_make`)
-- [ ] Remove the `from_xml_files` reference in the `Database` doc comment (the
+- [x] Remove the `from_xml_files` reference in the `Database` doc comment (the
       method does not exist), or implement it
 - [ ] Fix typo: `Calibration.vignetings` → `Calibration.vignettings`
 
