@@ -329,6 +329,60 @@ fn ptlens_distortion_pipeline_warps_raw_f32_pixels() {
     assert_eq!(&corrected[centre_idx..centre_idx + 3], &[4.0, 4.0, 0.5]);
 }
 
+#[test]
+fn tca_poly3_pipeline_warps_red_and_blue_raw_f32_channels() {
+    use dioptric::database::{Calibration, Lens, TcaEntry};
+    use dioptric::models::{TcaModel, TcaPoly3Params};
+
+    let lens = Lens {
+        maker: "Test".into(),
+        model: "TCA Poly3 pipeline".into(),
+        mounts: vec![],
+        crop_factor: Some(1.0),
+        calibration: Calibration {
+            distortions: vec![],
+            tcas: vec![TcaEntry {
+                focal: 35.0,
+                model: TcaModel::Poly3(TcaPoly3Params {
+                    vr: 1.0,
+                    br: 0.2,
+                    vb: 1.0,
+                    bb: -0.2,
+                }),
+            }],
+            vignettings: vec![],
+        },
+    };
+    let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 4.0, 10.0).unwrap();
+    assert!(matches!(profile.tca, Some(TcaModel::Poly3(_))));
+
+    let (width, height, channels) = (8u32, 8u32, 3u32);
+    let src: Vec<f32> = (0..height)
+        .flat_map(|y| (0..width).flat_map(move |x| [x as f32, y as f32, (x + y) as f32]))
+        .collect();
+
+    let corrected = profile
+        .correct_tca_raw_f32(width, height, channels, &src)
+        .unwrap();
+
+    let off_centre_idx = ((width + 1) * channels) as usize;
+    let off_centre = &corrected[off_centre_idx..off_centre_idx + 3];
+    assert!(
+        (0.55..0.80).contains(&off_centre[0]),
+        "red channel should sample outward, got {}",
+        off_centre[0]
+    );
+    assert_eq!(
+        off_centre[1], 1.0,
+        "green channel should be copied from the source pixel"
+    );
+    assert!(
+        (2.50..2.85).contains(&off_centre[2]),
+        "blue channel should sample inward, got {}",
+        off_centre[2]
+    );
+}
+
 // ── Correction smoke tests (DynamicImage API) ─────────────────────────────────
 
 #[cfg(feature = "image")]

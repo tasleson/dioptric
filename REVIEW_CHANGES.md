@@ -38,7 +38,7 @@ rasterlab.
 
 - [x] Add pipeline-level tests for Poly5 distortion model
 - [x] Add pipeline-level tests for PtLens distortion model
-- [ ] Add pipeline-level tests for TcaPoly3 TCA model
+- [x] Add pipeline-level tests for TcaPoly3 TCA model
 - [ ] Add a test that verifies warp actually moves pixels to the expected
       location (e.g. barrel distortion moves corner pixels inward)
 - [ ] Add a test for `from_xml` error path through the public API (not just
