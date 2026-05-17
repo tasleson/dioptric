@@ -214,6 +214,61 @@ fn rasterlab_image_round_trip_uses_linear_raw_buffer_without_extra_pixel_copy() 
     );
 }
 
+#[test]
+fn poly5_distortion_pipeline_warps_raw_f32_pixels() {
+    use dioptric::database::{Calibration, DistortionEntry, Lens};
+    use dioptric::models::{DistortionModel, Poly5Params};
+
+    let lens = Lens {
+        maker: "Test".into(),
+        model: "Poly5 pipeline".into(),
+        mounts: vec![],
+        crop_factor: Some(1.0),
+        calibration: Calibration {
+            distortions: vec![DistortionEntry {
+                focal: 35.0,
+                model: DistortionModel::Poly5(Poly5Params { k1: -0.2, k2: 0.04 }),
+            }],
+            tcas: vec![],
+            vignettings: vec![],
+        },
+    };
+    let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 4.0, 10.0).unwrap();
+    assert!(matches!(
+        profile.distortion,
+        Some(DistortionModel::Poly5(_))
+    ));
+
+    let (width, height, channels) = (8u32, 8u32, 3u32);
+    let src: Vec<f32> = (0..height)
+        .flat_map(|y| (0..width).flat_map(move |x| [x as f32, y as f32, 0.25]))
+        .collect();
+
+    let corrected = profile
+        .correct_distortion_raw_f32(width, height, channels, &src)
+        .unwrap();
+
+    let corner = &corrected[0..3];
+    assert!(
+        (0.55..0.75).contains(&corner[0]),
+        "top-left red channel should sample inward, got {}",
+        corner[0]
+    );
+    assert!(
+        (0.55..0.75).contains(&corner[1]),
+        "top-left green channel should sample inward, got {}",
+        corner[1]
+    );
+    assert!(
+        (corner[2] - 0.25).abs() < 1e-6,
+        "constant blue channel should be preserved, got {}",
+        corner[2]
+    );
+
+    let centre_idx = ((4 * width + 4) * channels) as usize;
+    assert_eq!(&corrected[centre_idx..centre_idx + 3], &[4.0, 4.0, 0.25]);
+}
+
 // ── Correction smoke tests (DynamicImage API) ─────────────────────────────────
 
 #[cfg(feature = "image")]
