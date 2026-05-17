@@ -35,7 +35,7 @@ impl PtLensParams {
 
 /// Parameters for the Poly3 distortion model.
 ///
-/// `r_d = r_u * (1 + k1*r_u²)`
+/// `r_d = r_u * (1 - k1 + k1*r_u²)`
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Poly3Params {
     pub k1: f32,
@@ -45,7 +45,7 @@ impl Poly3Params {
     /// Map an undistorted radius to a distorted radius.
     #[inline]
     pub fn apply(self, r_u: f32) -> f32 {
-        r_u * (1.0 + self.k1 * r_u * r_u)
+        r_u * (1.0 - self.k1 + self.k1 * r_u * r_u)
     }
 
     pub fn lerp(a: Self, b: Self, t: f32) -> Self {
@@ -164,18 +164,22 @@ impl TcaLinearParams {
 /// Poly3 TCA model.
 ///
 /// For red and blue independently:
-/// `r_corrected = r * (v + b*r²)`
-/// where `vr`/`vb` is the linear scaling factor and `br`/`bb` is the cubic term.
-/// (Green is unchanged.)
+/// `r_corrected = r * (b*r² + c*r + v)`.
+/// `vr`/`vb` are the constant terms, `cr`/`cb` are the linear terms,
+/// and `br`/`bb` are the quadratic-in-radius terms. Green is unchanged.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TcaPoly3Params {
-    /// Linear scale factor for the red channel.
+    /// Constant scale factor for the red channel.
     pub vr: f32,
-    /// Cubic coefficient for the red channel.
+    /// Linear coefficient for the red channel.
+    pub cr: f32,
+    /// Quadratic-in-radius coefficient for the red channel.
     pub br: f32,
-    /// Linear scale factor for the blue channel.
+    /// Constant scale factor for the blue channel.
     pub vb: f32,
-    /// Cubic coefficient for the blue channel.
+    /// Linear coefficient for the blue channel.
+    pub cb: f32,
+    /// Quadratic-in-radius coefficient for the blue channel.
     pub bb: f32,
 }
 
@@ -183,20 +187,22 @@ impl TcaPoly3Params {
     /// Corrected radius for the red channel.
     #[inline]
     pub fn red(self, r: f32) -> f32 {
-        r * (self.vr + self.br * r * r)
+        r * (self.br * r * r + self.cr * r + self.vr)
     }
 
     /// Corrected radius for the blue channel.
     #[inline]
     pub fn blue(self, r: f32) -> f32 {
-        r * (self.vb + self.bb * r * r)
+        r * (self.bb * r * r + self.cb * r + self.vb)
     }
 
     pub fn lerp(a: Self, b: Self, t: f32) -> Self {
         Self {
             vr: a.vr + (b.vr - a.vr) * t,
+            cr: a.cr + (b.cr - a.cr) * t,
             br: a.br + (b.br - a.br) * t,
             vb: a.vb + (b.vb - a.vb) * t,
+            cb: a.cb + (b.cb - a.cb) * t,
             bb: a.bb + (b.bb - a.bb) * t,
         }
     }
@@ -322,7 +328,7 @@ mod tests {
         let p = Poly3Params { k1: -0.01 };
         let model = DistortionModel::Poly3(p);
         let r_u = 0.5_f32;
-        let expected = r_u * (1.0 + p.k1 * r_u * r_u);
+        let expected = r_u * (1.0 - p.k1 + p.k1 * r_u * r_u);
         let result = model.undistorted_to_distorted(r_u);
         assert!((result - expected).abs() < 1e-6);
     }
@@ -387,8 +393,10 @@ mod tests {
     fn tca_poly3_centre_unaffected() {
         let p = TcaPoly3Params {
             vr: 1.0001,
+            cr: -0.00001,
             br: -0.00002,
             vb: 0.9999,
+            cb: 0.00002,
             bb: 0.00003,
         };
         let model = TcaModel::Poly3(p);
@@ -396,6 +404,22 @@ mod tests {
         // displacement = r * factor = 0 * anything = 0
         assert_eq!(0.0_f32 * rr, 0.0);
         assert_eq!(0.0_f32 * rb, 0.0);
+    }
+
+    #[test]
+    fn tca_poly3_known_value_includes_linear_terms() {
+        let p = TcaPoly3Params {
+            vr: 1.0,
+            cr: 0.2,
+            br: 0.3,
+            vb: 0.9,
+            cb: -0.1,
+            bb: 0.05,
+        };
+        let r = 0.5_f32;
+
+        assert!((p.red(r) - r * (p.br * r * r + p.cr * r + p.vr)).abs() < 1e-6);
+        assert!((p.blue(r) - r * (p.bb * r * r + p.cb * r + p.vb)).abs() < 1e-6);
     }
 
     #[test]

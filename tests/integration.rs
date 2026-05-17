@@ -355,8 +355,10 @@ fn tca_poly3_pipeline_warps_red_and_blue_raw_f32_channels() {
                 focal: 35.0,
                 model: TcaModel::Poly3(TcaPoly3Params {
                     vr: 1.0,
+                    cr: 0.0,
                     br: 0.2,
                     vb: 1.0,
+                    cb: 0.0,
                     bb: -0.2,
                 }),
             }],
@@ -394,7 +396,7 @@ fn tca_poly3_pipeline_warps_red_and_blue_raw_f32_channels() {
 }
 
 #[test]
-fn barrel_distortion_moves_corner_sample_inward() {
+fn barrel_distortion_moves_off_corner_sample_inward() {
     use dioptric::database::{Calibration, DistortionEntry, Lens};
     use dioptric::models::{DistortionModel, Poly3Params};
 
@@ -406,7 +408,7 @@ fn barrel_distortion_moves_corner_sample_inward() {
         calibration: Calibration {
             distortions: vec![DistortionEntry {
                 focal: 35.0,
-                model: DistortionModel::Poly3(Poly3Params { k1: -0.2 }),
+                model: DistortionModel::Poly3(Poly3Params { k1: 0.2 }),
             }],
             tcas: vec![],
             vignettings: vec![],
@@ -422,22 +424,23 @@ fn barrel_distortion_moves_corner_sample_inward() {
     let corrected = profile
         .correct_distortion_raw_f32(width, height, channels, &src)
         .unwrap();
-    let corner = &corrected[0..3];
+    let off_corner_idx = ((width + 1) * channels) as usize;
+    let off_corner = &corrected[off_corner_idx..off_corner_idx + 3];
 
     assert!(
-        (0.75..0.85).contains(&corner[0]),
-        "barrel distortion should sample the top-left red channel inward, got {}",
-        corner[0]
+        (1.20..1.35).contains(&off_corner[0]),
+        "barrel distortion should sample the off-corner red channel inward, got {}",
+        off_corner[0]
     );
     assert!(
-        (0.75..0.85).contains(&corner[1]),
-        "barrel distortion should sample the top-left green channel inward, got {}",
-        corner[1]
+        (1.20..1.35).contains(&off_corner[1]),
+        "barrel distortion should sample the off-corner green channel inward, got {}",
+        off_corner[1]
     );
     assert!(
-        (corner[2] - 1.0).abs() < 1e-6,
+        (off_corner[2] - 1.0).abs() < 1e-6,
         "constant channel should be preserved, got {}",
-        corner[2]
+        off_corner[2]
     );
 }
 

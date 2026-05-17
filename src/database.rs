@@ -14,6 +14,10 @@ use crate::models::{
 
 // ── Raw serde structs (mirror the XML) ───────────────────────────────────────
 
+fn default_one() -> f32 {
+    1.0
+}
+
 /// A single `<camera>` element.  Only the first (language-neutral) `<model>`
 /// and `<maker>` values are captured; additional localised variants are ignored.
 #[derive(Debug, Deserialize)]
@@ -53,17 +57,21 @@ struct RawTca {
     #[serde(rename = "@focal")]
     focal: f32,
     // linear model
-    #[serde(rename = "@kr", default)]
+    #[serde(rename = "@kr", default = "default_one")]
     kr: f32,
-    #[serde(rename = "@kb", default)]
+    #[serde(rename = "@kb", default = "default_one")]
     kb: f32,
     // poly3 model
-    #[serde(rename = "@vr", default)]
+    #[serde(rename = "@vr", default = "default_one")]
     vr: f32,
+    #[serde(rename = "@cr", default)]
+    cr: f32,
     #[serde(rename = "@br", default)]
     br: f32,
-    #[serde(rename = "@vb", default)]
+    #[serde(rename = "@vb", default = "default_one")]
     vb: f32,
+    #[serde(rename = "@cb", default)]
+    cb: f32,
     #[serde(rename = "@bb", default)]
     bb: f32,
 }
@@ -220,8 +228,10 @@ fn parse_tca(raw: &RawTca) -> Result<TcaModel> {
         })),
         "poly3" => Ok(TcaModel::Poly3(TcaPoly3Params {
             vr: raw.vr,
+            cr: raw.cr,
             br: raw.br,
             vb: raw.vb,
+            cb: raw.cb,
             bb: raw.bb,
         })),
         other => Err(Error::UnknownModel(other.to_owned())),
@@ -780,6 +790,46 @@ mod tests {
         assert_eq!(lens.calibration.distortions.len(), 2);
         assert_eq!(lens.calibration.tcas.len(), 2);
         assert_eq!(lens.calibration.vignettings.len(), 2);
+    }
+
+    #[test]
+    fn parse_tca_poly3_uses_cr_cb_and_lensfun_defaults() {
+        let xml = r#"<lensdatabase version="2">
+  <lens>
+    <maker>Acme</maker>
+    <model>Acme TCA</model>
+    <mount>M42</mount>
+    <cropfactor>1.0</cropfactor>
+    <calibration>
+      <tca model="poly3" focal="35" cr="0.2" br="0.3" cb="-0.1" bb="0.05"/>
+      <tca model="linear" focal="50"/>
+    </calibration>
+  </lens>
+</lensdatabase>"#;
+
+        let mut db = Database::empty();
+        db.from_xml(xml).expect("parse should succeed");
+        let lens = db.find_lens("Acme", "TCA").expect("lens should load");
+
+        match lens.calibration.tcas[0].model {
+            TcaModel::Poly3(params) => {
+                assert_eq!(params.vr, 1.0);
+                assert_eq!(params.cr, 0.2);
+                assert_eq!(params.br, 0.3);
+                assert_eq!(params.vb, 1.0);
+                assert_eq!(params.cb, -0.1);
+                assert_eq!(params.bb, 0.05);
+            }
+            other => panic!("expected poly3 TCA model, got {other:?}"),
+        }
+
+        match lens.calibration.tcas[1].model {
+            TcaModel::Linear(params) => {
+                assert_eq!(params.kr, 1.0);
+                assert_eq!(params.kb, 1.0);
+            }
+            other => panic!("expected linear TCA model, got {other:?}"),
+        }
     }
 
     #[test]
