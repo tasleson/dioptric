@@ -253,8 +253,14 @@ pub struct CorrectionProfile {
     pub(crate) tca: Option<TcaModel>,
     /// Resolved vignetting parameters (if calibration data is available).
     pub(crate) vignetting: Option<VignettingParams>,
-    /// Sensor crop factor, used to compute normalised coordinates.
-    crop_factor: f32,
+    /// Crop factor used for coordinate normalisation.  Comes from the lens
+    /// profile's calibration crop factor; falls back to the camera crop when
+    /// the lens does not specify one.  This matches Lensfun's convention: the
+    /// calibration coefficients are expressed in a coordinate system whose
+    /// normalised radius equals the calibration crop factor at the image
+    /// corner, so a camera with a different crop factor still feeds the
+    /// correct `r` values into the models.
+    calibration_crop: f32,
 }
 
 impl CorrectionProfile {
@@ -338,11 +344,13 @@ impl CorrectionProfile {
         let tca = interpolate_tca(cal.tcas(), focal);
         let vignetting = interpolate_vignetting(cal.vignettings(), focal, aperture, distance);
 
+        let calibration_crop = lens.crop_factor().unwrap_or(crop_factor);
+
         Ok(Self {
             distortion,
             tca,
             vignetting,
-            crop_factor,
+            calibration_crop,
         })
     }
 
@@ -764,7 +772,7 @@ impl CorrectionProfile {
         };
 
         let (wf, hf) = (w as f32, h as f32);
-        let norm = normalisation_factor(wf, hf, self.crop_factor) * options.scale;
+        let norm = normalisation_factor(wf, hf, self.calibration_crop) * options.scale;
         let cx = wf * 0.5;
         let cy = hf * 0.5;
         let xn = (x - cx) / norm;
@@ -806,7 +814,7 @@ impl CorrectionProfile {
         };
 
         let (wf, hf) = (w as f32, h as f32);
-        let norm = normalisation_factor(wf, hf, self.crop_factor) * options.scale;
+        let norm = normalisation_factor(wf, hf, self.calibration_crop) * options.scale;
         let cx = wf * 0.5;
         let cy = hf * 0.5;
         let xn = (px as f32 - cx) / norm;
@@ -1061,7 +1069,7 @@ impl CorrectionProfile {
         };
 
         let (wf, hf) = (w as f32, h as f32);
-        let norm = normalisation_factor(wf, hf, self.crop_factor);
+        let norm = normalisation_factor(wf, hf, self.calibration_crop);
         let cx = wf * 0.5;
         let cy = hf * 0.5;
         let ch = ch as usize;
@@ -1104,7 +1112,7 @@ impl CorrectionProfile {
         };
 
         let (wf, hf) = (w as f32, h as f32);
-        let norm = normalisation_factor(wf, hf, self.crop_factor);
+        let norm = normalisation_factor(wf, hf, self.calibration_crop);
         let cx = wf * 0.5;
         let cy = hf * 0.5;
         let ch = ch as usize;
@@ -1150,7 +1158,7 @@ impl CorrectionProfile {
         };
 
         let (wf, hf) = (w as f32, h as f32);
-        let norm = normalisation_factor(wf, hf, self.crop_factor);
+        let norm = normalisation_factor(wf, hf, self.calibration_crop);
         let cx = wf * 0.5;
         let cy = hf * 0.5;
         let ch = ch as usize;
@@ -1179,7 +1187,7 @@ impl CorrectionProfile {
         };
 
         let (wf, hf) = (w as f32, h as f32);
-        let norm = normalisation_factor(wf, hf, self.crop_factor);
+        let norm = normalisation_factor(wf, hf, self.calibration_crop);
         let cx = wf * 0.5;
         let cy = hf * 0.5;
         let ch = ch as usize;
@@ -1222,7 +1230,7 @@ impl CorrectionProfile {
         };
 
         let (wf, hf) = (w as f32, h as f32);
-        let norm = normalisation_factor(wf, hf, self.crop_factor);
+        let norm = normalisation_factor(wf, hf, self.calibration_crop);
         let cx = wf * 0.5;
         let cy = hf * 0.5;
         let ch = ch as usize;
@@ -1268,7 +1276,7 @@ impl CorrectionProfile {
         };
 
         let (wf, hf) = (w as f32, h as f32);
-        let norm = normalisation_factor(wf, hf, self.crop_factor);
+        let norm = normalisation_factor(wf, hf, self.calibration_crop);
         let cx = wf * 0.5;
         let cy = hf * 0.5;
         let ch = ch as usize;
@@ -1296,7 +1304,7 @@ impl CorrectionProfile {
         };
 
         let (wf, hf) = (w as f32, h as f32);
-        let norm = normalisation_factor(wf, hf, self.crop_factor);
+        let norm = normalisation_factor(wf, hf, self.calibration_crop);
         let cx = wf * 0.5;
         let cy = hf * 0.5;
         let ch = ch as usize;
@@ -1339,7 +1347,7 @@ impl CorrectionProfile {
         };
 
         let (wf, hf) = (w as f32, h as f32);
-        let norm = normalisation_factor(wf, hf, self.crop_factor);
+        let norm = normalisation_factor(wf, hf, self.calibration_crop);
         let cx = wf * 0.5;
         let cy = hf * 0.5;
         let ch = ch as usize;
@@ -1385,7 +1393,7 @@ impl CorrectionProfile {
         };
 
         let (wf, hf) = (w as f32, h as f32);
-        let norm = normalisation_factor(wf, hf, self.crop_factor);
+        let norm = normalisation_factor(wf, hf, self.calibration_crop);
         let cx = wf * 0.5;
         let cy = hf * 0.5;
         let ch = ch as usize;
@@ -1519,10 +1527,13 @@ fn unsupported_image_format(img: &DynamicImage) -> Error {
 
 // ── Geometry helpers ─────────────────────────────────────────────────────────
 
-/// Compute the normalisation factor that maps pixel coordinates to the lensfun
-/// normalised coordinate system.  Lensfun calibration data is expressed relative
-/// to a full-frame (crop=1) sensor, so on a crop sensor the normalised radius
-/// must be scaled by 1/crop_factor.
+/// Map pixel coordinates to the Lensfun normalised coordinate system.
+///
+/// `crop_factor` must be the **calibration** crop factor (from the lens
+/// profile).  Lensfun calibration coefficients are expressed in a coordinate
+/// system where `r = calibration_crop` at the image corner; dividing the
+/// pixel half-diagonal by the calibration crop reproduces that coordinate
+/// system on any camera body.
 #[inline]
 fn normalisation_factor(w: f32, h: f32, crop_factor: f32) -> f32 {
     (w * w + h * h).sqrt() * 0.5 / crop_factor
@@ -2567,6 +2578,108 @@ mod tests {
         assert_ne!(
             all[idx], sequential[idx],
             "combined geometry should avoid the old second resampling pass"
+        );
+    }
+
+    #[test]
+    fn calibration_crop_rescales_coordinates() {
+        use crate::database::{Calibration, DistortionEntry, Lens};
+        use crate::models::Poly3Params;
+
+        let make_lens = |crop: f32| Lens {
+            maker: "Test".into(),
+            model: "Test 35mm".into(),
+            mounts: vec![],
+            crop_factor: Some(crop),
+            calibration: Calibration {
+                distortions: vec![DistortionEntry {
+                    focal: 35.0,
+                    model: DistortionModel::Poly3(Poly3Params { k1: -0.05 }),
+                    real_focal: None,
+                }],
+                tcas: vec![],
+                vignettings: vec![],
+            },
+            aspect_ratio: None,
+            projection: None,
+        };
+
+        let (w, h, ch) = (64u32, 64u32, 3u32);
+        let src: Vec<u8> = (0..(w * h * ch) as usize)
+            .map(|i| (i % 256) as u8)
+            .collect();
+
+        let ff_lens = make_lens(1.0);
+
+        let same_crop = CorrectionProfile::new(&ff_lens, 1.0, 35.0, 4.0, 10.0).unwrap();
+        let same_out = same_crop.correct_distortion_raw(w, h, ch, &src).unwrap();
+
+        let diff_camera_crop = CorrectionProfile::new(&ff_lens, 1.6, 35.0, 4.0, 10.0).unwrap();
+        let diff_out = diff_camera_crop
+            .correct_distortion_raw(w, h, ch, &src)
+            .unwrap();
+
+        assert_eq!(
+            same_out, diff_out,
+            "normalization uses the calibration crop (1.0), not the camera crop (1.6)"
+        );
+
+        let crop_lens = make_lens(1.6);
+        let crop_profile = CorrectionProfile::new(&crop_lens, 1.0, 35.0, 4.0, 10.0).unwrap();
+        let crop_out = crop_profile.correct_distortion_raw(w, h, ch, &src).unwrap();
+        assert_ne!(
+            same_out, crop_out,
+            "different calibration crop should produce different results"
+        );
+    }
+
+    #[test]
+    fn calibration_crop_falls_back_to_camera_crop() {
+        use crate::database::{Calibration, DistortionEntry, Lens};
+        use crate::models::Poly3Params;
+
+        let lens_no_crop = Lens {
+            maker: "Test".into(),
+            model: "Test 35mm".into(),
+            mounts: vec![],
+            crop_factor: None,
+            calibration: Calibration {
+                distortions: vec![DistortionEntry {
+                    focal: 35.0,
+                    model: DistortionModel::Poly3(Poly3Params { k1: -0.05 }),
+                    real_focal: None,
+                }],
+                tcas: vec![],
+                vignettings: vec![],
+            },
+            aspect_ratio: None,
+            projection: None,
+        };
+
+        let lens_with_crop = Lens {
+            crop_factor: Some(1.6),
+            ..lens_no_crop.clone()
+        };
+
+        let (w, h, ch) = (64u32, 64u32, 3u32);
+        let src: Vec<u8> = (0..(w * h * ch) as usize)
+            .map(|i| (i % 256) as u8)
+            .collect();
+
+        let profile_fallback = CorrectionProfile::new(&lens_no_crop, 1.6, 35.0, 4.0, 10.0).unwrap();
+        let profile_explicit =
+            CorrectionProfile::new(&lens_with_crop, 1.6, 35.0, 4.0, 10.0).unwrap();
+
+        let out_fallback = profile_fallback
+            .correct_distortion_raw(w, h, ch, &src)
+            .unwrap();
+        let out_explicit = profile_explicit
+            .correct_distortion_raw(w, h, ch, &src)
+            .unwrap();
+
+        assert_eq!(
+            out_fallback, out_explicit,
+            "lens with no crop factor should fall back to camera crop"
         );
     }
 

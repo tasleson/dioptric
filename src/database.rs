@@ -617,10 +617,7 @@ fn convert_lens(raw: RawLens) -> Lens {
         }
     }
 
-    let aspect_ratio = raw
-        .aspect_ratio
-        .as_deref()
-        .and_then(AspectRatio::parse);
+    let aspect_ratio = raw.aspect_ratio.as_deref().and_then(AspectRatio::parse);
     let projection = raw.lens_type.as_deref().and_then(LensProjection::parse);
 
     Lens {
@@ -1307,10 +1304,7 @@ mod tests {
 
         let fisheye = db.find_lenses("Acme", "Fisheye").next().unwrap();
         assert_eq!(fisheye.projection(), Some(LensProjection::FisheyeEquisolid));
-        assert_eq!(
-            fisheye.aspect_ratio().map(AspectRatio::ratio),
-            Some(1.5),
-        );
+        assert_eq!(fisheye.aspect_ratio().map(AspectRatio::ratio), Some(1.5),);
         assert_eq!(fisheye.calibration.distortions[0].real_focal, Some(8.4));
         assert_eq!(fisheye.calibration.distortions[1].real_focal, None);
 
@@ -1329,10 +1323,7 @@ mod tests {
             AspectRatio::parse("16:9").map(AspectRatio::ratio),
             Some(16.0 / 9.0),
         );
-        assert_eq!(
-            AspectRatio::parse("1.5").map(AspectRatio::ratio),
-            Some(1.5),
-        );
+        assert_eq!(AspectRatio::parse("1.5").map(AspectRatio::ratio), Some(1.5),);
         assert!(AspectRatio::parse("").is_none());
         assert!(AspectRatio::parse("not a ratio").is_none());
         assert!(AspectRatio::parse("0:1").is_none());
