@@ -59,6 +59,13 @@ lookups use the camera mount and crop factor to rank duplicate lens profiles.
 Use `find_lenses_for_camera` or `find_lenses_by_name_for_camera` to inspect
 ranked alternatives and surface ambiguous profile choices in a UI.
 
+## Provenance
+
+dioptric implements lens correction models described by the Lensfun project and
+uses the Lensfun XML database format. The implementation was written from the
+documented formulas and public database schema, without copying source code from
+the Lensfun C/C++ library or the Rust `lensfun` crate.
+
 ## License
 
 The crate source code is licensed under MIT — see [LICENSE](LICENSE).
