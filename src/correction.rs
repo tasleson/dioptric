@@ -99,7 +99,7 @@ impl CoordinateMapOptions {
 }
 
 /// Options for opt-in high-level correction methods.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CorrectionOptions {
     /// Apply distortion correction.
     distortion: bool,
@@ -107,6 +107,11 @@ pub struct CorrectionOptions {
     tca: bool,
     /// Apply vignetting correction.
     vignetting: bool,
+    /// Geometry scale around the image centre.  Values greater than `1.0`
+    /// zoom in, eliminating black borders introduced by distortion
+    /// correction.  Use [`CorrectionProfile::compute_autoscale`] to compute
+    /// the tightest crop that avoids any out-of-bounds source pixels.
+    scale: f32,
 }
 
 impl Default for CorrectionOptions {
@@ -115,6 +120,7 @@ impl Default for CorrectionOptions {
             distortion: true,
             tca: true,
             vignetting: true,
+            scale: 1.0,
         }
     }
 }
@@ -149,6 +155,21 @@ impl CorrectionOptions {
 
     pub fn vignetting_enabled(&self) -> bool {
         self.vignetting
+    }
+
+    /// Set the geometry scale.
+    ///
+    /// Values greater than `1.0` zoom in, cropping away black borders that
+    /// distortion correction can introduce at the image edges.  Use
+    /// [`CorrectionProfile::compute_autoscale`] to find the tightest crop.
+    pub fn with_scale(mut self, scale: f32) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    /// Current geometry scale.
+    pub fn scale(&self) -> f32 {
+        self.scale
     }
 }
 
@@ -390,6 +411,121 @@ impl CorrectionProfile {
         self.projection_mapping
     }
 
+    /// Compute the tightest geometry scale that keeps every output pixel's
+    /// source coordinate within the image bounds.
+    ///
+    /// The returned value is always `>= 1.0`.  Pass it to
+    /// [`CorrectionOptions::with_scale`] to eliminate the black borders that
+    /// distortion correction can introduce at the image edges.
+    ///
+    /// The computation considers distortion, TCA, and projection mapping
+    /// (whichever are present in this profile).  It samples every pixel
+    /// along the four image edges and bisects the scale for the worst-case
+    /// pixel, so the result is accurate to single-pixel precision.
+    pub fn compute_autoscale(&self, width: u32, height: u32) -> f32 {
+        if width == 0 || height == 0 {
+            return 1.0;
+        }
+
+        let has_geometry =
+            self.distortion.is_some() || self.tca.is_some() || self.projection_mapping.is_some();
+        if !has_geometry {
+            return 1.0;
+        }
+
+        let wf = width as f32;
+        let hf = height as f32;
+        let last_x = wf - 1.0;
+        let last_y = hf - 1.0;
+
+        let mut max_scale = 1.0f32;
+
+        let sample = |x: f32, y: f32| -> f32 { self.autoscale_for_pixel(width, height, x, y) };
+
+        for i in 0..width {
+            let x = i as f32;
+            max_scale = max_scale.max(sample(x, 0.0));
+            max_scale = max_scale.max(sample(x, last_y));
+        }
+        for i in 1..height.saturating_sub(1) {
+            let y = i as f32;
+            max_scale = max_scale.max(sample(0.0, y));
+            max_scale = max_scale.max(sample(last_x, y));
+        }
+
+        max_scale
+    }
+
+    fn autoscale_for_pixel(&self, w: u32, h: u32, x: f32, y: f32) -> f32 {
+        if self.pixel_in_bounds_at_scale(w, h, x, y, 1.0) {
+            return 1.0;
+        }
+
+        let mut lo = 1.0f32;
+        let mut hi = 10.0f32;
+        for _ in 0..8 {
+            if self.pixel_in_bounds_at_scale(w, h, x, y, hi) {
+                break;
+            }
+            hi *= 2.0;
+        }
+
+        for _ in 0..32 {
+            let mid = (lo + hi) * 0.5;
+            if self.pixel_in_bounds_at_scale(w, h, x, y, mid) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        hi
+    }
+
+    fn pixel_in_bounds_at_scale(&self, w: u32, h: u32, x: f32, y: f32, scale: f32) -> bool {
+        let opts = CoordinateMapOptions::new().with_scale(scale);
+        let wf = w as f32;
+        let hf = h as f32;
+
+        if self.tca.is_some() {
+            let px = x.round() as u32;
+            let py = y.round() as u32;
+            let coords = self.tca_source_coordinates(w, h, px, py, opts);
+            let check = |c: &Coordinate| c.x >= 0.0 && c.x < wf && c.y >= 0.0 && c.y < hf;
+
+            if self.distortion.is_some() || self.projection_mapping.is_some() {
+                let composed = SubpixelCoordinates {
+                    red: self.distortion_source_coordinate_at(
+                        w,
+                        h,
+                        coords.red.x,
+                        coords.red.y,
+                        opts,
+                    ),
+                    green: self.distortion_source_coordinate_at(
+                        w,
+                        h,
+                        coords.green.x,
+                        coords.green.y,
+                        opts,
+                    ),
+                    blue: self.distortion_source_coordinate_at(
+                        w,
+                        h,
+                        coords.blue.x,
+                        coords.blue.y,
+                        opts,
+                    ),
+                };
+                check(&composed.red) && check(&composed.green) && check(&composed.blue)
+            } else {
+                check(&coords.red) && check(&coords.green) && check(&coords.blue)
+            }
+        } else {
+            let coord = self.distortion_source_coordinate_at(w, h, x, y, opts);
+            coord.x >= 0.0 && coord.x < wf && coord.y >= 0.0 && coord.y < hf
+        }
+    }
+
     // ── Raw-slice public API ────────────────────────────────────────────
 
     /// Apply all available corrections to raw pixel data, returning a new
@@ -424,7 +560,7 @@ impl CorrectionProfile {
         src: &[u8],
     ) -> Result<Vec<u8>> {
         validate_buffer(width, height, channels, src.len())?;
-        self.warp_distortion_raw(src, width, height, channels)
+        self.warp_distortion_raw(src, width, height, channels, 1.0)
     }
 
     /// Apply vignetting correction in-place to raw pixel data.
@@ -458,7 +594,7 @@ impl CorrectionProfile {
         src: &[u8],
     ) -> Result<Vec<u8>> {
         validate_buffer(width, height, channels, src.len())?;
-        self.warp_tca_raw(src, width, height, channels)
+        self.warp_tca_raw(src, width, height, channels, 1.0)
     }
 
     // ── u16 linear raw-slice public API ──────────────────────────────────
@@ -496,7 +632,7 @@ impl CorrectionProfile {
         src: &[u16],
     ) -> Result<Vec<u16>> {
         validate_buffer_u16(width, height, channels, src.len())?;
-        self.warp_distortion_raw_u16(src, width, height, channels)
+        self.warp_distortion_raw_u16(src, width, height, channels, 1.0)
     }
 
     /// Apply vignetting correction in-place to u16 linear pixel data.
@@ -530,7 +666,7 @@ impl CorrectionProfile {
         src: &[u16],
     ) -> Result<Vec<u16>> {
         validate_buffer_u16(width, height, channels, src.len())?;
-        self.warp_tca_raw_u16(src, width, height, channels)
+        self.warp_tca_raw_u16(src, width, height, channels, 1.0)
     }
 
     // ── f32 linear raw-slice public API ───────────────────────────────────
@@ -568,7 +704,7 @@ impl CorrectionProfile {
         src: &[f32],
     ) -> Result<Vec<f32>> {
         validate_buffer_f32(width, height, channels, src.len())?;
-        self.warp_distortion_raw_f32(src, width, height, channels)
+        self.warp_distortion_raw_f32(src, width, height, channels, 1.0)
     }
 
     /// Apply vignetting correction in-place to f32 linear pixel data.
@@ -602,7 +738,7 @@ impl CorrectionProfile {
         src: &[f32],
     ) -> Result<Vec<f32>> {
         validate_buffer_f32(width, height, channels, src.len())?;
-        self.warp_tca_raw_f32(src, width, height, channels)
+        self.warp_tca_raw_f32(src, width, height, channels, 1.0)
     }
 
     // ── Higher-level option and coordinate-map APIs ─────────────────────
@@ -627,14 +763,7 @@ impl CorrectionProfile {
         if options.vignetting {
             self.correct_vignetting_raw_inplace(&mut current, width, height, channels);
         }
-        self.correct_geometry_raw(
-            &current,
-            width,
-            height,
-            channels,
-            options.distortion,
-            options.tca,
-        )
+        self.correct_geometry_raw(&current, width, height, channels, options)
     }
 
     /// Apply selected corrections to linear `u16` pixel data using
@@ -652,14 +781,7 @@ impl CorrectionProfile {
         if options.vignetting {
             self.correct_vignetting_raw_u16_inplace(&mut current, width, height, channels);
         }
-        self.correct_geometry_raw_u16(
-            &current,
-            width,
-            height,
-            channels,
-            options.distortion,
-            options.tca,
-        )
+        self.correct_geometry_raw_u16(&current, width, height, channels, options)
     }
 
     /// Apply selected corrections to linear `f32` pixel data using
@@ -677,14 +799,7 @@ impl CorrectionProfile {
         if options.vignetting {
             self.correct_vignetting_raw_f32_inplace(&mut current, width, height, channels);
         }
-        self.correct_geometry_raw_f32(
-            &current,
-            width,
-            height,
-            channels,
-            options.distortion,
-            options.tca,
-        )
+        self.correct_geometry_raw_f32(&current, width, height, channels, options)
     }
 
     /// Build a distortion source-coordinate map for every output pixel.
@@ -926,16 +1041,16 @@ impl CorrectionProfile {
         width: u32,
         height: u32,
         channels: u32,
-        distortion: bool,
-        tca: bool,
+        opts: CorrectionOptions,
     ) -> Result<Vec<u8>> {
-        let has_dist = distortion && self.distortion.is_some();
-        let has_tca = tca && self.tca.is_some();
+        let has_dist = opts.distortion && self.distortion.is_some();
+        let has_tca = opts.tca && self.tca.is_some();
         let has_proj = self.projection_mapping.is_some();
+        let s = opts.scale;
         match (has_dist || has_proj, has_tca) {
-            (true, true) => self.warp_distortion_and_tca_raw(src, width, height, channels),
-            (true, false) => self.warp_distortion_raw(src, width, height, channels),
-            (false, true) => self.warp_tca_raw(src, width, height, channels),
+            (true, true) => self.warp_distortion_and_tca_raw(src, width, height, channels, s),
+            (true, false) => self.warp_distortion_raw(src, width, height, channels, s),
+            (false, true) => self.warp_tca_raw(src, width, height, channels, s),
             (false, false) => Ok(src.to_vec()),
         }
     }
@@ -946,16 +1061,16 @@ impl CorrectionProfile {
         width: u32,
         height: u32,
         channels: u32,
-        distortion: bool,
-        tca: bool,
+        opts: CorrectionOptions,
     ) -> Result<Vec<u16>> {
-        let has_dist = distortion && self.distortion.is_some();
-        let has_tca = tca && self.tca.is_some();
+        let has_dist = opts.distortion && self.distortion.is_some();
+        let has_tca = opts.tca && self.tca.is_some();
         let has_proj = self.projection_mapping.is_some();
+        let s = opts.scale;
         match (has_dist || has_proj, has_tca) {
-            (true, true) => self.warp_distortion_and_tca_raw_u16(src, width, height, channels),
-            (true, false) => self.warp_distortion_raw_u16(src, width, height, channels),
-            (false, true) => self.warp_tca_raw_u16(src, width, height, channels),
+            (true, true) => self.warp_distortion_and_tca_raw_u16(src, width, height, channels, s),
+            (true, false) => self.warp_distortion_raw_u16(src, width, height, channels, s),
+            (false, true) => self.warp_tca_raw_u16(src, width, height, channels, s),
             (false, false) => Ok(src.to_vec()),
         }
     }
@@ -966,48 +1081,45 @@ impl CorrectionProfile {
         width: u32,
         height: u32,
         channels: u32,
-        distortion: bool,
-        tca: bool,
+        opts: CorrectionOptions,
     ) -> Result<Vec<f32>> {
-        let has_dist = distortion && self.distortion.is_some();
-        let has_tca = tca && self.tca.is_some();
+        let has_dist = opts.distortion && self.distortion.is_some();
+        let has_tca = opts.tca && self.tca.is_some();
         let has_proj = self.projection_mapping.is_some();
+        let s = opts.scale;
         match (has_dist || has_proj, has_tca) {
-            (true, true) => self.warp_distortion_and_tca_raw_f32(src, width, height, channels),
-            (true, false) => self.warp_distortion_raw_f32(src, width, height, channels),
-            (false, true) => self.warp_tca_raw_f32(src, width, height, channels),
+            (true, true) => self.warp_distortion_and_tca_raw_f32(src, width, height, channels, s),
+            (true, false) => self.warp_distortion_raw_f32(src, width, height, channels, s),
+            (false, true) => self.warp_tca_raw_f32(src, width, height, channels, s),
             (false, false) => Ok(src.to_vec()),
         }
     }
 
-    fn composed_source_coordinates(&self, w: u32, h: u32, px: u32, py: u32) -> SubpixelCoordinates {
-        let tca = self.tca_source_coordinates(w, h, px, py, CoordinateMapOptions::default());
+    fn composed_source_coordinates(
+        &self,
+        w: u32,
+        h: u32,
+        px: u32,
+        py: u32,
+        scale: f32,
+    ) -> SubpixelCoordinates {
+        let opts = CoordinateMapOptions::new().with_scale(scale);
+        let tca = self.tca_source_coordinates(w, h, px, py, opts);
         SubpixelCoordinates {
-            red: self.distortion_source_coordinate_at(
-                w,
-                h,
-                tca.red.x,
-                tca.red.y,
-                CoordinateMapOptions::default(),
-            ),
-            green: self.distortion_source_coordinate_at(
-                w,
-                h,
-                tca.green.x,
-                tca.green.y,
-                CoordinateMapOptions::default(),
-            ),
-            blue: self.distortion_source_coordinate_at(
-                w,
-                h,
-                tca.blue.x,
-                tca.blue.y,
-                CoordinateMapOptions::default(),
-            ),
+            red: self.distortion_source_coordinate_at(w, h, tca.red.x, tca.red.y, opts),
+            green: self.distortion_source_coordinate_at(w, h, tca.green.x, tca.green.y, opts),
+            blue: self.distortion_source_coordinate_at(w, h, tca.blue.x, tca.blue.y, opts),
         }
     }
 
-    fn warp_distortion_and_tca_raw(&self, src: &[u8], w: u32, h: u32, ch: u32) -> Result<Vec<u8>> {
+    fn warp_distortion_and_tca_raw(
+        &self,
+        src: &[u8],
+        w: u32,
+        h: u32,
+        ch: u32,
+        scale: f32,
+    ) -> Result<Vec<u8>> {
         let ch = ch as usize;
         let wi = w as i32;
         let hi = h as i32;
@@ -1016,7 +1128,7 @@ impl CorrectionProfile {
 
         for py in 0..h {
             for px in 0..w {
-                let coords = self.composed_source_coordinates(w, h, px, py);
+                let coords = self.composed_source_coordinates(w, h, px, py, scale);
                 let dst_idx = py as usize * stride + px as usize * ch;
                 dst[dst_idx] =
                     bilinear_sample_channel_raw(src, wi, hi, ch, coords.red.x, coords.red.y, 0);
@@ -1046,6 +1158,7 @@ impl CorrectionProfile {
         w: u32,
         h: u32,
         ch: u32,
+        scale: f32,
     ) -> Result<Vec<u16>> {
         let ch = ch as usize;
         let wi = w as i32;
@@ -1055,7 +1168,7 @@ impl CorrectionProfile {
 
         for py in 0..h {
             for px in 0..w {
-                let coords = self.composed_source_coordinates(w, h, px, py);
+                let coords = self.composed_source_coordinates(w, h, px, py, scale);
                 let dst_idx = py as usize * stride + px as usize * ch;
                 dst[dst_idx] =
                     bilinear_sample_channel_raw_u16(src, wi, hi, ch, coords.red.x, coords.red.y, 0);
@@ -1099,6 +1212,7 @@ impl CorrectionProfile {
         w: u32,
         h: u32,
         ch: u32,
+        scale: f32,
     ) -> Result<Vec<f32>> {
         let ch = ch as usize;
         let wi = w as i32;
@@ -1108,7 +1222,7 @@ impl CorrectionProfile {
 
         for py in 0..h {
             for px in 0..w {
-                let coords = self.composed_source_coordinates(w, h, px, py);
+                let coords = self.composed_source_coordinates(w, h, px, py, scale);
                 let dst_idx = py as usize * stride + px as usize * ch;
                 dst[dst_idx] =
                     bilinear_sample_channel_raw_f32(src, wi, hi, ch, coords.red.x, coords.red.y, 0);
@@ -1146,7 +1260,14 @@ impl CorrectionProfile {
         Ok(dst)
     }
 
-    fn warp_distortion_raw_u16(&self, src: &[u16], w: u32, h: u32, ch: u32) -> Result<Vec<u16>> {
+    fn warp_distortion_raw_u16(
+        &self,
+        src: &[u16],
+        w: u32,
+        h: u32,
+        ch: u32,
+        scale: f32,
+    ) -> Result<Vec<u16>> {
         if self.distortion.is_none() && self.projection_mapping.is_none() {
             return Ok(src.to_vec());
         }
@@ -1155,17 +1276,12 @@ impl CorrectionProfile {
         let wi = w as i32;
         let hi = h as i32;
         let stride = w as usize * ch;
+        let opts = CoordinateMapOptions::new().with_scale(scale);
 
         let mut dst = vec![0u16; src.len()];
         for py in 0..h {
             for px in 0..w {
-                let coord = self.distortion_source_coordinate_at(
-                    w,
-                    h,
-                    px as f32,
-                    py as f32,
-                    CoordinateMapOptions::default(),
-                );
+                let coord = self.distortion_source_coordinate_at(w, h, px as f32, py as f32, opts);
 
                 let dst_idx = py as usize * stride + px as usize * ch;
                 bilinear_sample_raw_u16(
@@ -1182,7 +1298,14 @@ impl CorrectionProfile {
         Ok(dst)
     }
 
-    fn warp_tca_raw_u16(&self, src: &[u16], w: u32, h: u32, ch: u32) -> Result<Vec<u16>> {
+    fn warp_tca_raw_u16(
+        &self,
+        src: &[u16],
+        w: u32,
+        h: u32,
+        ch: u32,
+        scale: f32,
+    ) -> Result<Vec<u16>> {
         if self.tca.is_none() && self.projection_mapping.is_none() {
             return Ok(src.to_vec());
         }
@@ -1191,12 +1314,12 @@ impl CorrectionProfile {
         let wi = w as i32;
         let hi = h as i32;
         let stride = w as usize * ch;
+        let opts = CoordinateMapOptions::new().with_scale(scale);
 
         let mut dst = vec![0u16; src.len()];
         for py in 0..h {
             for px in 0..w {
-                let coords =
-                    self.tca_source_coordinates(w, h, px, py, CoordinateMapOptions::default());
+                let coords = self.tca_source_coordinates(w, h, px, py, opts);
                 let dst_idx = py as usize * stride + px as usize * ch;
                 dst[dst_idx] =
                     bilinear_sample_channel_raw_u16(src, wi, hi, ch, coords.red.x, coords.red.y, 0);
@@ -1264,7 +1387,14 @@ impl CorrectionProfile {
         }
     }
 
-    fn warp_distortion_raw_f32(&self, src: &[f32], w: u32, h: u32, ch: u32) -> Result<Vec<f32>> {
+    fn warp_distortion_raw_f32(
+        &self,
+        src: &[f32],
+        w: u32,
+        h: u32,
+        ch: u32,
+        scale: f32,
+    ) -> Result<Vec<f32>> {
         if self.distortion.is_none() && self.projection_mapping.is_none() {
             return Ok(src.to_vec());
         }
@@ -1273,17 +1403,12 @@ impl CorrectionProfile {
         let wi = w as i32;
         let hi = h as i32;
         let stride = w as usize * ch;
+        let opts = CoordinateMapOptions::new().with_scale(scale);
 
         let mut dst = vec![0.0f32; src.len()];
         for py in 0..h {
             for px in 0..w {
-                let coord = self.distortion_source_coordinate_at(
-                    w,
-                    h,
-                    px as f32,
-                    py as f32,
-                    CoordinateMapOptions::default(),
-                );
+                let coord = self.distortion_source_coordinate_at(w, h, px as f32, py as f32, opts);
 
                 let dst_idx = py as usize * stride + px as usize * ch;
                 bilinear_sample_raw_f32(
@@ -1300,7 +1425,14 @@ impl CorrectionProfile {
         Ok(dst)
     }
 
-    fn warp_tca_raw_f32(&self, src: &[f32], w: u32, h: u32, ch: u32) -> Result<Vec<f32>> {
+    fn warp_tca_raw_f32(
+        &self,
+        src: &[f32],
+        w: u32,
+        h: u32,
+        ch: u32,
+        scale: f32,
+    ) -> Result<Vec<f32>> {
         if self.tca.is_none() && self.projection_mapping.is_none() {
             return Ok(src.to_vec());
         }
@@ -1309,12 +1441,12 @@ impl CorrectionProfile {
         let wi = w as i32;
         let hi = h as i32;
         let stride = w as usize * ch;
+        let opts = CoordinateMapOptions::new().with_scale(scale);
 
         let mut dst = vec![0.0f32; src.len()];
         for py in 0..h {
             for px in 0..w {
-                let coords =
-                    self.tca_source_coordinates(w, h, px, py, CoordinateMapOptions::default());
+                let coords = self.tca_source_coordinates(w, h, px, py, opts);
                 let dst_idx = py as usize * stride + px as usize * ch;
                 dst[dst_idx] =
                     bilinear_sample_channel_raw_f32(src, wi, hi, ch, coords.red.x, coords.red.y, 0);
@@ -1381,7 +1513,14 @@ impl CorrectionProfile {
         }
     }
 
-    fn warp_distortion_raw(&self, src: &[u8], w: u32, h: u32, ch: u32) -> Result<Vec<u8>> {
+    fn warp_distortion_raw(
+        &self,
+        src: &[u8],
+        w: u32,
+        h: u32,
+        ch: u32,
+        scale: f32,
+    ) -> Result<Vec<u8>> {
         if self.distortion.is_none() && self.projection_mapping.is_none() {
             return Ok(src.to_vec());
         }
@@ -1390,17 +1529,12 @@ impl CorrectionProfile {
         let wi = w as i32;
         let hi = h as i32;
         let stride = w as usize * ch;
+        let opts = CoordinateMapOptions::new().with_scale(scale);
 
         let mut dst = vec![0u8; src.len()];
         for py in 0..h {
             for px in 0..w {
-                let coord = self.distortion_source_coordinate_at(
-                    w,
-                    h,
-                    px as f32,
-                    py as f32,
-                    CoordinateMapOptions::default(),
-                );
+                let coord = self.distortion_source_coordinate_at(w, h, px as f32, py as f32, opts);
 
                 let dst_idx = py as usize * stride + px as usize * ch;
                 bilinear_sample_raw(
@@ -1417,7 +1551,7 @@ impl CorrectionProfile {
         Ok(dst)
     }
 
-    fn warp_tca_raw(&self, src: &[u8], w: u32, h: u32, ch: u32) -> Result<Vec<u8>> {
+    fn warp_tca_raw(&self, src: &[u8], w: u32, h: u32, ch: u32, scale: f32) -> Result<Vec<u8>> {
         if self.tca.is_none() && self.projection_mapping.is_none() {
             return Ok(src.to_vec());
         }
@@ -1426,12 +1560,12 @@ impl CorrectionProfile {
         let wi = w as i32;
         let hi = h as i32;
         let stride = w as usize * ch;
+        let opts = CoordinateMapOptions::new().with_scale(scale);
 
         let mut dst = vec![0u8; src.len()];
         for py in 0..h {
             for px in 0..w {
-                let coords =
-                    self.tca_source_coordinates(w, h, px, py, CoordinateMapOptions::default());
+                let coords = self.tca_source_coordinates(w, h, px, py, opts);
                 let dst_idx = py as usize * stride + px as usize * ch;
                 dst[dst_idx] =
                     bilinear_sample_channel_raw(src, wi, hi, ch, coords.red.x, coords.red.y, 0);
@@ -2614,7 +2748,7 @@ mod tests {
         let all = profile
             .correct_all_raw_f32(w as u32, h as u32, ch as u32, &src)
             .unwrap();
-        let coords = profile.composed_source_coordinates(w as u32, h as u32, 1, 1);
+        let coords = profile.composed_source_coordinates(w as u32, h as u32, 1, 1, 1.0);
         let idx = (w + 1) * ch;
         let expected_red = bilinear_sample_channel_raw_f32(
             &src,
@@ -2979,5 +3113,203 @@ mod tests {
             .collect();
         let result = profile.correct_all_raw_f32(w, h, ch, &src).unwrap();
         assert_ne!(result, src, "projection conversion should modify the image");
+    }
+
+    #[test]
+    fn autoscale_is_one_when_no_geometry() {
+        use crate::database::{Calibration, Lens, VignettingEntry};
+        use crate::models::VignettingParams;
+
+        let lens = Lens {
+            maker: "Test".into(),
+            model: "No geometry".into(),
+            mounts: vec![],
+            crop_factor: Some(1.0),
+            calibration: Calibration {
+                distortions: vec![],
+                tcas: vec![],
+                vignettings: vec![VignettingEntry {
+                    focal: 35.0,
+                    aperture: 2.0,
+                    distance: 1000.0,
+                    params: VignettingParams {
+                        k1: -0.5,
+                        k2: 0.1,
+                        k3: -0.05,
+                    },
+                }],
+            },
+            aspect_ratio: None,
+            projection: None,
+        };
+        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0, None).unwrap();
+        assert_eq!(profile.compute_autoscale(64, 64), 1.0);
+    }
+
+    #[test]
+    fn autoscale_at_least_one() {
+        use crate::database::{Calibration, DistortionEntry, Lens};
+        use crate::models::Poly3Params;
+
+        let lens = Lens {
+            maker: "Test".into(),
+            model: "Autoscale".into(),
+            mounts: vec![],
+            crop_factor: Some(1.0),
+            calibration: Calibration {
+                distortions: vec![DistortionEntry {
+                    focal: 35.0,
+                    model: DistortionModel::Poly3(Poly3Params { k1: 0.0 }),
+                    real_focal: None,
+                }],
+                tcas: vec![],
+                vignettings: vec![],
+            },
+            aspect_ratio: None,
+            projection: None,
+        };
+        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 4.0, 10.0, None).unwrap();
+        assert!(profile.compute_autoscale(64, 64) >= 1.0);
+    }
+
+    #[test]
+    fn autoscale_eliminates_black_borders() {
+        use crate::database::{Calibration, DistortionEntry, Lens};
+        use crate::models::Poly5Params;
+
+        // Poly5 with these coefficients has f(r)/r > 1 near the corners
+        // (creating black borders) but < 1 at mid-radii, so autoscale
+        // can zoom in to eliminate the borders.
+        let lens = Lens {
+            maker: "Test".into(),
+            model: "Corner expansion".into(),
+            mounts: vec![],
+            crop_factor: Some(1.0),
+            calibration: Calibration {
+                distortions: vec![DistortionEntry {
+                    focal: 24.0,
+                    model: DistortionModel::Poly5(Poly5Params { k1: -0.2, k2: 0.3 }),
+                    real_focal: None,
+                }],
+                tcas: vec![],
+                vignettings: vec![],
+            },
+            aspect_ratio: None,
+            projection: None,
+        };
+        let profile = CorrectionProfile::new(&lens, 1.0, 24.0, 4.0, 10.0, None).unwrap();
+
+        let (w, h) = (64u32, 64u32);
+
+        // Verify that at scale=1 the corner IS out of bounds.
+        let corner = profile.distortion_source_coordinate_at(
+            w,
+            h,
+            0.0,
+            0.0,
+            CoordinateMapOptions::default(),
+        );
+        assert!(
+            corner.x < 0.0,
+            "corner should be out of bounds at scale 1.0, got x={}",
+            corner.x
+        );
+
+        let scale = profile.compute_autoscale(w, h);
+        assert!(
+            scale > 1.0,
+            "distortion correction should need autoscale > 1.0, got {scale}"
+        );
+
+        let opts = CoordinateMapOptions::new().with_scale(scale);
+        for x in 0..w {
+            let top = profile.distortion_source_coordinate_at(w, h, x as f32, 0.0, opts);
+            let bot = profile.distortion_source_coordinate_at(w, h, x as f32, (h - 1) as f32, opts);
+            assert!(
+                top.x >= -0.01 && top.y >= -0.01,
+                "top edge pixel ({x}, 0) out of bounds at scale {scale}: ({}, {})",
+                top.x,
+                top.y
+            );
+            assert!(
+                bot.x >= -0.01 && bot.y <= h as f32,
+                "bottom edge pixel ({x}, {}) out of bounds at scale {scale}: ({}, {})",
+                h - 1,
+                bot.x,
+                bot.y
+            );
+        }
+        for y in 0..h {
+            let left = profile.distortion_source_coordinate_at(w, h, 0.0, y as f32, opts);
+            let right =
+                profile.distortion_source_coordinate_at(w, h, (w - 1) as f32, y as f32, opts);
+            assert!(
+                left.x >= -0.01 && left.y >= -0.01,
+                "left edge pixel (0, {y}) out of bounds at scale {scale}: ({}, {})",
+                left.x,
+                left.y
+            );
+            assert!(
+                right.x <= w as f32 && right.y <= h as f32,
+                "right edge pixel ({}, {y}) out of bounds at scale {scale}: ({}, {})",
+                w - 1,
+                right.x,
+                right.y
+            );
+        }
+    }
+
+    #[test]
+    fn scale_option_threads_through_correction() {
+        use crate::database::{Calibration, DistortionEntry, Lens};
+        use crate::models::Poly5Params;
+
+        let lens = Lens {
+            maker: "Test".into(),
+            model: "Scale threading".into(),
+            mounts: vec![],
+            crop_factor: Some(1.0),
+            calibration: Calibration {
+                distortions: vec![DistortionEntry {
+                    focal: 24.0,
+                    model: DistortionModel::Poly5(Poly5Params { k1: -0.2, k2: 0.3 }),
+                    real_focal: None,
+                }],
+                tcas: vec![],
+                vignettings: vec![],
+            },
+            aspect_ratio: None,
+            projection: None,
+        };
+        let profile = CorrectionProfile::new(&lens, 1.0, 24.0, 4.0, 10.0, None).unwrap();
+
+        let (w, h, ch) = (32u32, 32u32, 3u32);
+        let src = vec![0.5f32; (w * h * ch) as usize];
+
+        let no_scale = profile
+            .correct_with_options_raw_f32(w, h, ch, &src, CorrectionOptions::new())
+            .unwrap();
+
+        let scale = profile.compute_autoscale(w, h);
+        let with_scale = profile
+            .correct_with_options_raw_f32(
+                w,
+                h,
+                ch,
+                &src,
+                CorrectionOptions::new().with_scale(scale),
+            )
+            .unwrap();
+
+        assert_ne!(
+            no_scale, with_scale,
+            "applying autoscale should change the output"
+        );
+    }
+
+    #[test]
+    fn autoscale_default_is_one() {
+        let opts = CorrectionOptions::new();
+        assert_eq!(opts.scale(), 1.0);
     }
 }
