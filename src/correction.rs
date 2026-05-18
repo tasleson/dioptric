@@ -12,7 +12,7 @@
 use image::{DynamicImage, RgbImage, RgbaImage};
 
 use crate::database::{
-    Camera, Lens, interpolate_distortion, interpolate_tca, interpolate_vignetting,
+    Camera, Lens, LensProjection, interpolate_distortion, interpolate_tca, interpolate_vignetting,
 };
 use crate::error::{Error, Result};
 use crate::models::{DistortionModel, TcaModel, VignettingParams, linear_to_srgb, srgb_to_linear};
@@ -160,6 +160,7 @@ pub struct CorrectionProfileBuilder<'a> {
     focal_length: Option<f32>,
     aperture: Option<f32>,
     distance: Option<f32>,
+    target_projection: Option<LensProjection>,
 }
 
 impl<'a> CorrectionProfileBuilder<'a> {
@@ -170,6 +171,7 @@ impl<'a> CorrectionProfileBuilder<'a> {
             focal_length: None,
             aperture: None,
             distance: None,
+            target_projection: None,
         }
     }
 
@@ -203,6 +205,16 @@ impl<'a> CorrectionProfileBuilder<'a> {
         self
     }
 
+    /// Set the desired output projection.
+    ///
+    /// When the target differs from the lens's native projection, the geometry
+    /// pipeline remaps pixels from the source projection to the target.
+    /// Defaults to the lens's own projection (no conversion).
+    pub fn target_projection(mut self, projection: LensProjection) -> Self {
+        self.target_projection = Some(projection);
+        self
+    }
+
     /// Build a correction profile.
     pub fn build(self) -> Result<CorrectionProfile> {
         CorrectionProfile::new(
@@ -215,6 +227,7 @@ impl<'a> CorrectionProfileBuilder<'a> {
                 .ok_or_else(|| missing_profile_parameter("aperture"))?,
             self.distance
                 .ok_or_else(|| missing_profile_parameter("distance"))?,
+            self.target_projection,
         )
     }
 }
@@ -261,6 +274,11 @@ pub struct CorrectionProfile {
     /// corner, so a camera with a different crop factor still feeds the
     /// correct `r` values into the models.
     calibration_crop: f32,
+    /// Projection conversion: source (lens native) and target projections.
+    /// When `source != target`, the geometry pipeline remaps pixels between
+    /// projections via a unit-sphere intermediary.  `None` means no
+    /// projection conversion is needed.
+    projection_mapping: Option<(LensProjection, LensProjection)>,
 }
 
 impl CorrectionProfile {
@@ -316,6 +334,7 @@ impl CorrectionProfile {
         focal: f32,
         aperture: f32,
         distance: f32,
+        target_projection: Option<LensProjection>,
     ) -> Result<Self> {
         if !focal.is_finite() || focal <= 0.0 {
             return Err(Error::InvalidParameter(format!(
@@ -346,12 +365,29 @@ impl CorrectionProfile {
 
         let calibration_crop = lens.crop_factor().unwrap_or(crop_factor);
 
+        let source = lens.projection_or_default();
+        let target = target_projection.unwrap_or(source);
+        let projection_mapping =
+            if std::mem::discriminant(&source) != std::mem::discriminant(&target) {
+                Some((source, target))
+            } else {
+                None
+            };
+
         Ok(Self {
             distortion,
             tca,
             vignetting,
             calibration_crop,
+            projection_mapping,
         })
+    }
+
+    /// The projection mapping that will be applied during geometry correction,
+    /// if any.  Returns `Some((source, target))` when the lens's native
+    /// projection differs from the requested target.
+    pub fn projection_mapping(&self) -> Option<(LensProjection, LensProjection)> {
+        self.projection_mapping
     }
 
     // ── Raw-slice public API ────────────────────────────────────────────
@@ -764,20 +800,33 @@ impl CorrectionProfile {
         y: f32,
         options: CoordinateMapOptions,
     ) -> Coordinate {
-        let model = match self.distortion {
-            Some(model) => model,
-            None => {
-                return Coordinate { x, y };
-            }
-        };
-
         let (wf, hf) = (w as f32, h as f32);
         let norm = normalisation_factor(wf, hf, self.calibration_crop) * options.scale;
         let cx = wf * 0.5;
         let cy = hf * 0.5;
         let xn = (x - cx) / norm;
         let yn = (y - cy) / norm;
-        let r = (xn * xn + yn * yn).sqrt();
+
+        let (src_xn, src_yn) = if let Some((source, target)) = self.projection_mapping {
+            match projection_remap(target, source, xn, yn) {
+                Some(coords) => coords,
+                None => return Coordinate { x: -1.0, y: -1.0 },
+            }
+        } else {
+            (xn, yn)
+        };
+
+        let model = match self.distortion {
+            Some(model) => model,
+            None => {
+                return Coordinate {
+                    x: src_xn * norm + cx,
+                    y: src_yn * norm + cy,
+                };
+            }
+        };
+
+        let r = (src_xn * src_xn + src_yn * src_yn).sqrt();
         let mapped_r = match options.transform_mode {
             TransformMode::Rectify => model.undistorted_to_distorted(r),
             TransformMode::Reverse => invert_distortion_radius(model, r),
@@ -785,8 +834,8 @@ impl CorrectionProfile {
         let radial_scale = if r > 1e-8 { mapped_r / r } else { 1.0 };
 
         Coordinate {
-            x: xn * radial_scale * norm + cx,
-            y: yn * radial_scale * norm + cy,
+            x: src_xn * radial_scale * norm + cx,
+            y: src_yn * radial_scale * norm + cy,
         }
     }
 
@@ -805,6 +854,15 @@ impl CorrectionProfile {
         let tca = match self.tca {
             Some(tca) => tca,
             None => {
+                if self.projection_mapping.is_some() {
+                    let proj_coord =
+                        self.distortion_source_coordinate_at(w, h, px as f32, py as f32, options);
+                    return SubpixelCoordinates {
+                        red: proj_coord,
+                        green: proj_coord,
+                        blue: proj_coord,
+                    };
+                }
                 return SubpixelCoordinates {
                     red: base,
                     green: base,
@@ -819,19 +877,45 @@ impl CorrectionProfile {
         let cy = hf * 0.5;
         let xn = (px as f32 - cx) / norm;
         let yn = (py as f32 - cy) / norm;
-        let r = (xn * xn + yn * yn).sqrt();
+
+        let (src_xn, src_yn) = if let Some((source, target)) = self.projection_mapping {
+            match projection_remap(target, source, xn, yn) {
+                Some(coords) => coords,
+                None => {
+                    let oob = Coordinate { x: -1.0, y: -1.0 };
+                    return SubpixelCoordinates {
+                        red: oob,
+                        green: oob,
+                        blue: oob,
+                    };
+                }
+            }
+        } else {
+            (xn, yn)
+        };
+
+        let r = (src_xn * src_xn + src_yn * src_yn).sqrt();
         let red_scale = tca_channel_scale(tca, r, Channel::Red, options.transform_mode);
         let blue_scale = tca_channel_scale(tca, r, Channel::Blue, options.transform_mode);
 
+        let green = if self.projection_mapping.is_some() {
+            Coordinate {
+                x: src_xn * norm + cx,
+                y: src_yn * norm + cy,
+            }
+        } else {
+            base
+        };
+
         SubpixelCoordinates {
             red: Coordinate {
-                x: xn * red_scale * norm + cx,
-                y: yn * red_scale * norm + cy,
+                x: src_xn * red_scale * norm + cx,
+                y: src_yn * red_scale * norm + cy,
             },
-            green: base,
+            green,
             blue: Coordinate {
-                x: xn * blue_scale * norm + cx,
-                y: yn * blue_scale * norm + cy,
+                x: src_xn * blue_scale * norm + cx,
+                y: src_yn * blue_scale * norm + cy,
             },
         }
     }
@@ -845,10 +929,10 @@ impl CorrectionProfile {
         distortion: bool,
         tca: bool,
     ) -> Result<Vec<u8>> {
-        match (
-            distortion && self.distortion.is_some(),
-            tca && self.tca.is_some(),
-        ) {
+        let has_dist = distortion && self.distortion.is_some();
+        let has_tca = tca && self.tca.is_some();
+        let has_proj = self.projection_mapping.is_some();
+        match (has_dist || has_proj, has_tca) {
             (true, true) => self.warp_distortion_and_tca_raw(src, width, height, channels),
             (true, false) => self.warp_distortion_raw(src, width, height, channels),
             (false, true) => self.warp_tca_raw(src, width, height, channels),
@@ -865,10 +949,10 @@ impl CorrectionProfile {
         distortion: bool,
         tca: bool,
     ) -> Result<Vec<u16>> {
-        match (
-            distortion && self.distortion.is_some(),
-            tca && self.tca.is_some(),
-        ) {
+        let has_dist = distortion && self.distortion.is_some();
+        let has_tca = tca && self.tca.is_some();
+        let has_proj = self.projection_mapping.is_some();
+        match (has_dist || has_proj, has_tca) {
             (true, true) => self.warp_distortion_and_tca_raw_u16(src, width, height, channels),
             (true, false) => self.warp_distortion_raw_u16(src, width, height, channels),
             (false, true) => self.warp_tca_raw_u16(src, width, height, channels),
@@ -885,10 +969,10 @@ impl CorrectionProfile {
         distortion: bool,
         tca: bool,
     ) -> Result<Vec<f32>> {
-        match (
-            distortion && self.distortion.is_some(),
-            tca && self.tca.is_some(),
-        ) {
+        let has_dist = distortion && self.distortion.is_some();
+        let has_tca = tca && self.tca.is_some();
+        let has_proj = self.projection_mapping.is_some();
+        match (has_dist || has_proj, has_tca) {
             (true, true) => self.warp_distortion_and_tca_raw_f32(src, width, height, channels),
             (true, false) => self.warp_distortion_raw_f32(src, width, height, channels),
             (false, true) => self.warp_tca_raw_f32(src, width, height, channels),
@@ -1063,15 +1147,10 @@ impl CorrectionProfile {
     }
 
     fn warp_distortion_raw_u16(&self, src: &[u16], w: u32, h: u32, ch: u32) -> Result<Vec<u16>> {
-        let model = match self.distortion {
-            Some(m) => m,
-            None => return Ok(src.to_vec()),
-        };
+        if self.distortion.is_none() && self.projection_mapping.is_none() {
+            return Ok(src.to_vec());
+        }
 
-        let (wf, hf) = (w as f32, h as f32);
-        let norm = normalisation_factor(wf, hf, self.calibration_crop);
-        let cx = wf * 0.5;
-        let cy = hf * 0.5;
         let ch = ch as usize;
         let wi = w as i32;
         let hi = h as i32;
@@ -1080,15 +1159,13 @@ impl CorrectionProfile {
         let mut dst = vec![0u16; src.len()];
         for py in 0..h {
             for px in 0..w {
-                let xn = (px as f32 - cx) / norm;
-                let yn = (py as f32 - cy) / norm;
-                let r_u = (xn * xn + yn * yn).sqrt();
-
-                let r_d = model.undistorted_to_distorted(r_u);
-                let scale = if r_u > 1e-8 { r_d / r_u } else { 1.0 };
-
-                let src_x = xn * scale * norm + cx;
-                let src_y = yn * scale * norm + cy;
+                let coord = self.distortion_source_coordinate_at(
+                    w,
+                    h,
+                    px as f32,
+                    py as f32,
+                    CoordinateMapOptions::default(),
+                );
 
                 let dst_idx = py as usize * stride + px as usize * ch;
                 bilinear_sample_raw_u16(
@@ -1096,8 +1173,8 @@ impl CorrectionProfile {
                     wi,
                     hi,
                     ch,
-                    src_x,
-                    src_y,
+                    coord.x,
+                    coord.y,
                     &mut dst[dst_idx..dst_idx + ch],
                 );
             }
@@ -1106,15 +1183,10 @@ impl CorrectionProfile {
     }
 
     fn warp_tca_raw_u16(&self, src: &[u16], w: u32, h: u32, ch: u32) -> Result<Vec<u16>> {
-        let tca = match self.tca {
-            Some(m) => m,
-            None => return Ok(src.to_vec()),
-        };
+        if self.tca.is_none() && self.projection_mapping.is_none() {
+            return Ok(src.to_vec());
+        }
 
-        let (wf, hf) = (w as f32, h as f32);
-        let norm = normalisation_factor(wf, hf, self.calibration_crop);
-        let cx = wf * 0.5;
-        let cy = hf * 0.5;
         let ch = ch as usize;
         let wi = w as i32;
         let hi = h as i32;
@@ -1123,28 +1195,40 @@ impl CorrectionProfile {
         let mut dst = vec![0u16; src.len()];
         for py in 0..h {
             for px in 0..w {
-                let xn = (px as f32 - cx) / norm;
-                let yn = (py as f32 - cy) / norm;
-                let r = (xn * xn + yn * yn).sqrt();
-
-                let (scale_r, scale_b) = tca.channel_radii(r);
-
-                let rx = xn * scale_r * norm + cx;
-                let ry = yn * scale_r * norm + cy;
-                let red = bilinear_sample_channel_raw_u16(src, wi, hi, ch, rx, ry, 0);
-
-                let bx = xn * scale_b * norm + cx;
-                let by = yn * scale_b * norm + cy;
-                let blue = bilinear_sample_channel_raw_u16(src, wi, hi, ch, bx, by, 2);
-
-                let src_idx = py as usize * stride + px as usize * ch;
-                let dst_idx = src_idx;
-                dst[dst_idx] = red;
-                dst[dst_idx + 1] = src[src_idx + 1];
-                dst[dst_idx + 2] = blue;
+                let coords =
+                    self.tca_source_coordinates(w, h, px, py, CoordinateMapOptions::default());
+                let dst_idx = py as usize * stride + px as usize * ch;
+                dst[dst_idx] =
+                    bilinear_sample_channel_raw_u16(src, wi, hi, ch, coords.red.x, coords.red.y, 0);
+                dst[dst_idx + 1] = bilinear_sample_channel_raw_u16(
+                    src,
+                    wi,
+                    hi,
+                    ch,
+                    coords.green.x,
+                    coords.green.y,
+                    1,
+                );
+                dst[dst_idx + 2] = bilinear_sample_channel_raw_u16(
+                    src,
+                    wi,
+                    hi,
+                    ch,
+                    coords.blue.x,
+                    coords.blue.y,
+                    2,
+                );
 
                 if ch == 4 {
-                    dst[dst_idx + 3] = src[src_idx + 3];
+                    dst[dst_idx + 3] = bilinear_sample_channel_raw_u16(
+                        src,
+                        wi,
+                        hi,
+                        ch,
+                        coords.green.x,
+                        coords.green.y,
+                        3,
+                    );
                 }
             }
         }
@@ -1181,15 +1265,10 @@ impl CorrectionProfile {
     }
 
     fn warp_distortion_raw_f32(&self, src: &[f32], w: u32, h: u32, ch: u32) -> Result<Vec<f32>> {
-        let model = match self.distortion {
-            Some(m) => m,
-            None => return Ok(src.to_vec()),
-        };
+        if self.distortion.is_none() && self.projection_mapping.is_none() {
+            return Ok(src.to_vec());
+        }
 
-        let (wf, hf) = (w as f32, h as f32);
-        let norm = normalisation_factor(wf, hf, self.calibration_crop);
-        let cx = wf * 0.5;
-        let cy = hf * 0.5;
         let ch = ch as usize;
         let wi = w as i32;
         let hi = h as i32;
@@ -1198,15 +1277,13 @@ impl CorrectionProfile {
         let mut dst = vec![0.0f32; src.len()];
         for py in 0..h {
             for px in 0..w {
-                let xn = (px as f32 - cx) / norm;
-                let yn = (py as f32 - cy) / norm;
-                let r_u = (xn * xn + yn * yn).sqrt();
-
-                let r_d = model.undistorted_to_distorted(r_u);
-                let scale = if r_u > 1e-8 { r_d / r_u } else { 1.0 };
-
-                let src_x = xn * scale * norm + cx;
-                let src_y = yn * scale * norm + cy;
+                let coord = self.distortion_source_coordinate_at(
+                    w,
+                    h,
+                    px as f32,
+                    py as f32,
+                    CoordinateMapOptions::default(),
+                );
 
                 let dst_idx = py as usize * stride + px as usize * ch;
                 bilinear_sample_raw_f32(
@@ -1214,8 +1291,8 @@ impl CorrectionProfile {
                     wi,
                     hi,
                     ch,
-                    src_x,
-                    src_y,
+                    coord.x,
+                    coord.y,
                     &mut dst[dst_idx..dst_idx + ch],
                 );
             }
@@ -1224,15 +1301,10 @@ impl CorrectionProfile {
     }
 
     fn warp_tca_raw_f32(&self, src: &[f32], w: u32, h: u32, ch: u32) -> Result<Vec<f32>> {
-        let tca = match self.tca {
-            Some(m) => m,
-            None => return Ok(src.to_vec()),
-        };
+        if self.tca.is_none() && self.projection_mapping.is_none() {
+            return Ok(src.to_vec());
+        }
 
-        let (wf, hf) = (w as f32, h as f32);
-        let norm = normalisation_factor(wf, hf, self.calibration_crop);
-        let cx = wf * 0.5;
-        let cy = hf * 0.5;
         let ch = ch as usize;
         let wi = w as i32;
         let hi = h as i32;
@@ -1241,28 +1313,40 @@ impl CorrectionProfile {
         let mut dst = vec![0.0f32; src.len()];
         for py in 0..h {
             for px in 0..w {
-                let xn = (px as f32 - cx) / norm;
-                let yn = (py as f32 - cy) / norm;
-                let r = (xn * xn + yn * yn).sqrt();
-
-                let (scale_r, scale_b) = tca.channel_radii(r);
-
-                let rx = xn * scale_r * norm + cx;
-                let ry = yn * scale_r * norm + cy;
-                let red = bilinear_sample_channel_raw_f32(src, wi, hi, ch, rx, ry, 0);
-
-                let bx = xn * scale_b * norm + cx;
-                let by = yn * scale_b * norm + cy;
-                let blue = bilinear_sample_channel_raw_f32(src, wi, hi, ch, bx, by, 2);
-
-                let src_idx = py as usize * stride + px as usize * ch;
-                let dst_idx = src_idx;
-                dst[dst_idx] = red;
-                dst[dst_idx + 1] = src[src_idx + 1];
-                dst[dst_idx + 2] = blue;
+                let coords =
+                    self.tca_source_coordinates(w, h, px, py, CoordinateMapOptions::default());
+                let dst_idx = py as usize * stride + px as usize * ch;
+                dst[dst_idx] =
+                    bilinear_sample_channel_raw_f32(src, wi, hi, ch, coords.red.x, coords.red.y, 0);
+                dst[dst_idx + 1] = bilinear_sample_channel_raw_f32(
+                    src,
+                    wi,
+                    hi,
+                    ch,
+                    coords.green.x,
+                    coords.green.y,
+                    1,
+                );
+                dst[dst_idx + 2] = bilinear_sample_channel_raw_f32(
+                    src,
+                    wi,
+                    hi,
+                    ch,
+                    coords.blue.x,
+                    coords.blue.y,
+                    2,
+                );
 
                 if ch == 4 {
-                    dst[dst_idx + 3] = src[src_idx + 3];
+                    dst[dst_idx + 3] = bilinear_sample_channel_raw_f32(
+                        src,
+                        wi,
+                        hi,
+                        ch,
+                        coords.green.x,
+                        coords.green.y,
+                        3,
+                    );
                 }
             }
         }
@@ -1298,15 +1382,10 @@ impl CorrectionProfile {
     }
 
     fn warp_distortion_raw(&self, src: &[u8], w: u32, h: u32, ch: u32) -> Result<Vec<u8>> {
-        let model = match self.distortion {
-            Some(m) => m,
-            None => return Ok(src.to_vec()),
-        };
+        if self.distortion.is_none() && self.projection_mapping.is_none() {
+            return Ok(src.to_vec());
+        }
 
-        let (wf, hf) = (w as f32, h as f32);
-        let norm = normalisation_factor(wf, hf, self.calibration_crop);
-        let cx = wf * 0.5;
-        let cy = hf * 0.5;
         let ch = ch as usize;
         let wi = w as i32;
         let hi = h as i32;
@@ -1315,15 +1394,13 @@ impl CorrectionProfile {
         let mut dst = vec![0u8; src.len()];
         for py in 0..h {
             for px in 0..w {
-                let xn = (px as f32 - cx) / norm;
-                let yn = (py as f32 - cy) / norm;
-                let r_u = (xn * xn + yn * yn).sqrt();
-
-                let r_d = model.undistorted_to_distorted(r_u);
-                let scale = if r_u > 1e-8 { r_d / r_u } else { 1.0 };
-
-                let src_x = xn * scale * norm + cx;
-                let src_y = yn * scale * norm + cy;
+                let coord = self.distortion_source_coordinate_at(
+                    w,
+                    h,
+                    px as f32,
+                    py as f32,
+                    CoordinateMapOptions::default(),
+                );
 
                 let dst_idx = py as usize * stride + px as usize * ch;
                 bilinear_sample_raw(
@@ -1331,8 +1408,8 @@ impl CorrectionProfile {
                     wi,
                     hi,
                     ch,
-                    src_x,
-                    src_y,
+                    coord.x,
+                    coord.y,
                     &mut dst[dst_idx..dst_idx + ch],
                 );
             }
@@ -1341,15 +1418,10 @@ impl CorrectionProfile {
     }
 
     fn warp_tca_raw(&self, src: &[u8], w: u32, h: u32, ch: u32) -> Result<Vec<u8>> {
-        let tca = match self.tca {
-            Some(m) => m,
-            None => return Ok(src.to_vec()),
-        };
+        if self.tca.is_none() && self.projection_mapping.is_none() {
+            return Ok(src.to_vec());
+        }
 
-        let (wf, hf) = (w as f32, h as f32);
-        let norm = normalisation_factor(wf, hf, self.calibration_crop);
-        let cx = wf * 0.5;
-        let cy = hf * 0.5;
         let ch = ch as usize;
         let wi = w as i32;
         let hi = h as i32;
@@ -1358,28 +1430,26 @@ impl CorrectionProfile {
         let mut dst = vec![0u8; src.len()];
         for py in 0..h {
             for px in 0..w {
-                let xn = (px as f32 - cx) / norm;
-                let yn = (py as f32 - cy) / norm;
-                let r = (xn * xn + yn * yn).sqrt();
-
-                let (scale_r, scale_b) = tca.channel_radii(r);
-
-                let rx = xn * scale_r * norm + cx;
-                let ry = yn * scale_r * norm + cy;
-                let red = bilinear_sample_channel_raw(src, wi, hi, ch, rx, ry, 0);
-
-                let bx = xn * scale_b * norm + cx;
-                let by = yn * scale_b * norm + cy;
-                let blue = bilinear_sample_channel_raw(src, wi, hi, ch, bx, by, 2);
-
-                let src_idx = py as usize * stride + px as usize * ch;
-                let dst_idx = src_idx;
-                dst[dst_idx] = red;
-                dst[dst_idx + 1] = src[src_idx + 1];
-                dst[dst_idx + 2] = blue;
+                let coords =
+                    self.tca_source_coordinates(w, h, px, py, CoordinateMapOptions::default());
+                let dst_idx = py as usize * stride + px as usize * ch;
+                dst[dst_idx] =
+                    bilinear_sample_channel_raw(src, wi, hi, ch, coords.red.x, coords.red.y, 0);
+                dst[dst_idx + 1] =
+                    bilinear_sample_channel_raw(src, wi, hi, ch, coords.green.x, coords.green.y, 1);
+                dst[dst_idx + 2] =
+                    bilinear_sample_channel_raw(src, wi, hi, ch, coords.blue.x, coords.blue.y, 2);
 
                 if ch == 4 {
-                    dst[dst_idx + 3] = src[src_idx + 3];
+                    dst[dst_idx + 3] = bilinear_sample_channel_raw(
+                        src,
+                        wi,
+                        hi,
+                        ch,
+                        coords.green.x,
+                        coords.green.y,
+                        3,
+                    );
                 }
             }
         }
@@ -1526,6 +1596,19 @@ fn unsupported_image_format(img: &DynamicImage) -> Error {
 }
 
 // ── Geometry helpers ─────────────────────────────────────────────────────────
+
+/// Remap normalised coordinates from a target projection to a source
+/// projection via the unit sphere.  Returns `None` if the coordinate is
+/// outside the valid domain of either projection.
+fn projection_remap(
+    target: LensProjection,
+    source: LensProjection,
+    x: f32,
+    y: f32,
+) -> Option<(f32, f32)> {
+    let sphere = target.to_sphere(x, y)?;
+    source.from_sphere(sphere.0, sphere.1, sphere.2)
+}
 
 /// Map pixel coordinates to the Lensfun normalised coordinate system.
 ///
@@ -1849,7 +1932,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0, None).unwrap();
         assert!(profile.vignetting.is_some());
 
         let (w, h, ch) = (64u32, 64u32, 3u32);
@@ -1882,7 +1965,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0, None).unwrap();
         assert!(profile.distortion.is_none());
 
         let src = vec![128u8; 16 * 16 * 3];
@@ -1903,7 +1986,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0, None).unwrap();
 
         let src = vec![0u8; 100];
         assert!(profile.correct_distortion_raw(10, 10, 3, &src).is_err());
@@ -1922,7 +2005,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0, None).unwrap();
 
         let src = vec![0u8; 200];
         assert!(profile.correct_distortion_raw(10, 10, 2, &src).is_err());
@@ -1950,7 +2033,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0, None).unwrap();
 
         let (w, h) = (16u32, 16u32);
         let src: Vec<u8> = (0..w * h).flat_map(|_| [100u8, 150, 200, 77]).collect();
@@ -2006,7 +2089,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0, None).unwrap();
 
         let (w, h, ch) = (64u32, 64u32, 3u32);
         let mut data = vec![0.75f32; (w * h * ch) as usize];
@@ -2034,7 +2117,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0, None).unwrap();
 
         let src = vec![0.5f32; 16 * 16 * 3];
         let result = profile.correct_distortion_raw_f32(16, 16, 3, &src).unwrap();
@@ -2054,7 +2137,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0, None).unwrap();
 
         let src = vec![0.0f32; 100];
         assert!(profile.correct_distortion_raw_f32(10, 10, 3, &src).is_err());
@@ -2082,7 +2165,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0, None).unwrap();
 
         let (w, h) = (16u32, 16u32);
         let src: Vec<f32> = (0..w * h).flat_map(|_| [0.4f32, 0.6, 0.8, 0.3]).collect();
@@ -2121,7 +2204,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0, None).unwrap();
 
         let (w, h, ch) = (16u32, 16u32, 4u32);
         let mut data: Vec<f32> = (0..w * h)
@@ -2185,7 +2268,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0, None).unwrap();
 
         let (w, h, ch) = (64u32, 64u32, 3u32);
         let mut data = vec![50000u16; (w * h * ch) as usize];
@@ -2213,7 +2296,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0, None).unwrap();
 
         let src = vec![32000u16; 16 * 16 * 3];
         let result = profile.correct_distortion_raw_u16(16, 16, 3, &src).unwrap();
@@ -2233,7 +2316,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0, None).unwrap();
 
         let src = vec![0u16; 100];
         assert!(profile.correct_distortion_raw_u16(10, 10, 3, &src).is_err());
@@ -2261,7 +2344,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0, None).unwrap();
 
         let (w, h) = (16u32, 16u32);
         let src: Vec<u16> = (0..w * h)
@@ -2303,7 +2386,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0, None).unwrap();
 
         let (w, h, ch) = (16u32, 16u32, 4u32);
         let mut data: Vec<u16> = (0..w * h)
@@ -2346,7 +2429,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 4.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 4.0, 10.0, None).unwrap();
 
         let distortion = profile.distortion_coordinate_map(8, 8).unwrap();
         assert_eq!(distortion.len(), 64);
@@ -2408,7 +2491,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0, None).unwrap();
         let src = vec![0.75f32; 16 * 16 * 3];
 
         let disabled = profile
@@ -2462,7 +2545,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0, None).unwrap();
         let src = vec![0.5f32; 16 * 16 * 3];
 
         let mut color_first_input = src.clone();
@@ -2516,7 +2599,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 4.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 4.0, 10.0, None).unwrap();
         let (w, h, ch) = (8, 8, 3);
         let mut src = vec![0.0f32; w * h * ch];
         for y in 0..h {
@@ -2611,10 +2694,11 @@ mod tests {
 
         let ff_lens = make_lens(1.0);
 
-        let same_crop = CorrectionProfile::new(&ff_lens, 1.0, 35.0, 4.0, 10.0).unwrap();
+        let same_crop = CorrectionProfile::new(&ff_lens, 1.0, 35.0, 4.0, 10.0, None).unwrap();
         let same_out = same_crop.correct_distortion_raw(w, h, ch, &src).unwrap();
 
-        let diff_camera_crop = CorrectionProfile::new(&ff_lens, 1.6, 35.0, 4.0, 10.0).unwrap();
+        let diff_camera_crop =
+            CorrectionProfile::new(&ff_lens, 1.6, 35.0, 4.0, 10.0, None).unwrap();
         let diff_out = diff_camera_crop
             .correct_distortion_raw(w, h, ch, &src)
             .unwrap();
@@ -2625,7 +2709,7 @@ mod tests {
         );
 
         let crop_lens = make_lens(1.6);
-        let crop_profile = CorrectionProfile::new(&crop_lens, 1.0, 35.0, 4.0, 10.0).unwrap();
+        let crop_profile = CorrectionProfile::new(&crop_lens, 1.0, 35.0, 4.0, 10.0, None).unwrap();
         let crop_out = crop_profile.correct_distortion_raw(w, h, ch, &src).unwrap();
         assert_ne!(
             same_out, crop_out,
@@ -2666,9 +2750,10 @@ mod tests {
             .map(|i| (i % 256) as u8)
             .collect();
 
-        let profile_fallback = CorrectionProfile::new(&lens_no_crop, 1.6, 35.0, 4.0, 10.0).unwrap();
+        let profile_fallback =
+            CorrectionProfile::new(&lens_no_crop, 1.6, 35.0, 4.0, 10.0, None).unwrap();
         let profile_explicit =
-            CorrectionProfile::new(&lens_with_crop, 1.6, 35.0, 4.0, 10.0).unwrap();
+            CorrectionProfile::new(&lens_with_crop, 1.6, 35.0, 4.0, 10.0, None).unwrap();
 
         let out_fallback = profile_fallback
             .correct_distortion_raw(w, h, ch, &src)
@@ -2715,7 +2800,7 @@ mod tests {
             aspect_ratio: None,
             projection: None,
         };
-        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0).unwrap();
+        let profile = CorrectionProfile::new(&lens, 1.0, 35.0, 2.0, 10.0, None).unwrap();
 
         let (w, h) = (32u32, 32u32);
         let mut raw_data = vec![0u8; (w * h * 3) as usize];
@@ -2737,5 +2822,162 @@ mod tests {
             _ => panic!("expected Rgb8"),
         };
         assert_eq!(img_bytes, result_raw);
+    }
+
+    #[test]
+    fn projection_mapping_none_when_same_projection() {
+        use crate::database::{Calibration, Lens, LensProjection};
+
+        let lens = Lens {
+            maker: "Test".into(),
+            model: "Test 10mm".into(),
+            mounts: vec![],
+            crop_factor: Some(1.0),
+            calibration: Calibration::default(),
+            aspect_ratio: None,
+            projection: Some(LensProjection::Rectilinear),
+        };
+        let profile = CorrectionProfile::new(
+            &lens,
+            1.0,
+            10.0,
+            4.0,
+            10.0,
+            Some(LensProjection::Rectilinear),
+        )
+        .unwrap();
+        assert!(profile.projection_mapping().is_none());
+    }
+
+    #[test]
+    fn projection_mapping_set_when_different() {
+        use crate::database::{Calibration, Lens, LensProjection};
+
+        let lens = Lens {
+            maker: "Test".into(),
+            model: "Test fisheye".into(),
+            mounts: vec![],
+            crop_factor: Some(1.0),
+            calibration: Calibration::default(),
+            aspect_ratio: None,
+            projection: Some(LensProjection::Fisheye),
+        };
+        let profile = CorrectionProfile::new(
+            &lens,
+            1.0,
+            10.0,
+            4.0,
+            10.0,
+            Some(LensProjection::Rectilinear),
+        )
+        .unwrap();
+        assert_eq!(
+            profile.projection_mapping(),
+            Some((LensProjection::Fisheye, LensProjection::Rectilinear))
+        );
+    }
+
+    #[test]
+    fn fisheye_to_rectilinear_samples_inward() {
+        use crate::database::{Calibration, Lens, LensProjection};
+
+        let lens = Lens {
+            maker: "Test".into(),
+            model: "Test fisheye 10mm".into(),
+            mounts: vec![],
+            crop_factor: Some(1.0),
+            calibration: Calibration::default(),
+            aspect_ratio: None,
+            projection: Some(LensProjection::Fisheye),
+        };
+        let profile = CorrectionProfile::new(
+            &lens,
+            1.0,
+            10.0,
+            4.0,
+            10.0,
+            Some(LensProjection::Rectilinear),
+        )
+        .unwrap();
+
+        let (w, h) = (64u32, 64u32);
+        let map = profile.distortion_coordinate_map(w, h).unwrap();
+
+        let centre = &map[(32 * w + 32) as usize];
+        assert!(
+            (centre.x - 32.0).abs() < 0.5 && (centre.y - 32.0).abs() < 0.5,
+            "centre should map near itself: ({}, {})",
+            centre.x,
+            centre.y
+        );
+
+        let corner = &map[0];
+        let cx = w as f32 * 0.5;
+        let cy = h as f32 * 0.5;
+        let corner_dist = ((corner.x - cx).powi(2) + (corner.y - cy).powi(2)).sqrt();
+        let pixel_dist = ((0.0 - cx).powi(2) + (0.0 - cy).powi(2)).sqrt();
+        assert!(
+            corner_dist < pixel_dist,
+            "fisheye→rectilinear should pull source inward: corner samples at ({}, {}), \
+             dist {corner_dist:.2} < pixel dist {pixel_dist:.2}",
+            corner.x,
+            corner.y
+        );
+    }
+
+    #[test]
+    fn no_projection_change_yields_identity_without_distortion() {
+        use crate::database::{Calibration, Lens};
+
+        let lens = Lens {
+            maker: "Test".into(),
+            model: "Test 50mm".into(),
+            mounts: vec![],
+            crop_factor: Some(1.0),
+            calibration: Calibration::default(),
+            aspect_ratio: None,
+            projection: None,
+        };
+        let profile = CorrectionProfile::new(&lens, 1.0, 50.0, 4.0, 10.0, None).unwrap();
+
+        let (w, h, ch) = (8u32, 8u32, 3u32);
+        let src: Vec<u8> = (0..w * h * ch).map(|i| (i % 256) as u8).collect();
+        let result = profile.correct_all_raw(w, h, ch, &src).unwrap();
+        assert_eq!(result, src);
+    }
+
+    #[test]
+    fn projection_correction_raw_f32_modifies_corners() {
+        use crate::database::{Calibration, Lens, LensProjection};
+
+        let lens = Lens {
+            maker: "Test".into(),
+            model: "Test fisheye 10mm".into(),
+            mounts: vec![],
+            crop_factor: Some(1.0),
+            calibration: Calibration::default(),
+            aspect_ratio: None,
+            projection: Some(LensProjection::Fisheye),
+        };
+        let profile = CorrectionProfile::new(
+            &lens,
+            1.0,
+            10.0,
+            4.0,
+            10.0,
+            Some(LensProjection::Rectilinear),
+        )
+        .unwrap();
+
+        let (w, h, ch) = (16u32, 16u32, 3u32);
+        let src: Vec<f32> = (0..w * h)
+            .flat_map(|i| {
+                let x = (i % w) as f32 / w as f32;
+                let y = (i / w) as f32 / h as f32;
+                [x, y, 0.5]
+            })
+            .collect();
+        let result = profile.correct_all_raw_f32(w, h, ch, &src).unwrap();
+        assert_ne!(result, src, "projection conversion should modify the image");
     }
 }

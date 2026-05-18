@@ -250,6 +250,172 @@ impl LensProjection {
             _ => None,
         }
     }
+
+    /// Convert normalised image coordinates to a unit-sphere direction vector.
+    ///
+    /// Returns `(dx, dy, dz)` on the unit sphere, or `None` if the coordinates
+    /// are outside the projection's valid domain.
+    pub fn to_sphere(self, x: f32, y: f32) -> Option<(f32, f32, f32)> {
+        match self {
+            Self::Rectilinear => {
+                let r3 = (x * x + y * y + 1.0).sqrt();
+                Some((x / r3, y / r3, 1.0 / r3))
+            }
+            Self::Fisheye => {
+                let r = (x * x + y * y).sqrt();
+                if r < 1e-8 {
+                    return Some((0.0, 0.0, 1.0));
+                }
+                if r > std::f32::consts::PI {
+                    return None;
+                }
+                let sin_r = r.sin();
+                let cos_r = r.cos();
+                Some((sin_r * x / r, sin_r * y / r, cos_r))
+            }
+            Self::FisheyeStereographic => {
+                let r = (x * x + y * y).sqrt();
+                if r < 1e-8 {
+                    return Some((0.0, 0.0, 1.0));
+                }
+                let theta = 2.0 * (r * 0.5).atan();
+                let sin_t = theta.sin();
+                let cos_t = theta.cos();
+                Some((sin_t * x / r, sin_t * y / r, cos_t))
+            }
+            Self::FisheyeEquisolid => {
+                let r = (x * x + y * y).sqrt();
+                if r < 1e-8 {
+                    return Some((0.0, 0.0, 1.0));
+                }
+                let half_r = r * 0.5;
+                if half_r > 1.0 {
+                    return None;
+                }
+                let theta = 2.0 * half_r.asin();
+                let sin_t = theta.sin();
+                let cos_t = theta.cos();
+                Some((sin_t * x / r, sin_t * y / r, cos_t))
+            }
+            Self::FisheyeOrthographic => {
+                let r = (x * x + y * y).sqrt();
+                if r < 1e-8 {
+                    return Some((0.0, 0.0, 1.0));
+                }
+                if r > 1.0 {
+                    return None;
+                }
+                let dz = (1.0 - r * r).sqrt();
+                Some((x, y, dz))
+            }
+            Self::FisheyeThoby => {
+                let r = (x * x + y * y).sqrt();
+                if r < 1e-8 {
+                    return Some((0.0, 0.0, 1.0));
+                }
+                const K1: f32 = 1.47;
+                const K2: f32 = 0.713;
+                let arg = r / K1;
+                if arg > 1.0 {
+                    return None;
+                }
+                let theta = arg.asin() / K2;
+                let sin_t = theta.sin();
+                let cos_t = theta.cos();
+                Some((sin_t * x / r, sin_t * y / r, cos_t))
+            }
+            Self::Panoramic => {
+                let cos_x = x.cos();
+                let sin_x = x.sin();
+                let denom = (1.0 + y * y).sqrt();
+                Some((sin_x / denom, y / denom, cos_x / denom))
+            }
+            Self::Equirectangular => {
+                let cos_y = y.cos();
+                let sin_y = y.sin();
+                let cos_x = x.cos();
+                let sin_x = x.sin();
+                Some((sin_x * cos_y, sin_y, cos_x * cos_y))
+            }
+        }
+    }
+
+    /// Convert a unit-sphere direction vector to normalised image coordinates.
+    ///
+    /// Returns `None` if the direction is behind the camera (dz <= 0 for
+    /// rectilinear) or otherwise outside the projection's output domain.
+    pub fn from_sphere(self, dx: f32, dy: f32, dz: f32) -> Option<(f32, f32)> {
+        match self {
+            Self::Rectilinear => {
+                if dz <= 1e-8 {
+                    return None;
+                }
+                Some((dx / dz, dy / dz))
+            }
+            Self::Fisheye => {
+                let r_xy = (dx * dx + dy * dy).sqrt();
+                if r_xy < 1e-8 {
+                    return Some((0.0, 0.0));
+                }
+                let theta = r_xy.atan2(dz);
+                Some((theta * dx / r_xy, theta * dy / r_xy))
+            }
+            Self::FisheyeStereographic => {
+                let r_xy = (dx * dx + dy * dy).sqrt();
+                if r_xy < 1e-8 {
+                    return Some((0.0, 0.0));
+                }
+                let theta = r_xy.atan2(dz);
+                let r_img = 2.0 * (theta * 0.5).tan();
+                Some((r_img * dx / r_xy, r_img * dy / r_xy))
+            }
+            Self::FisheyeEquisolid => {
+                let r_xy = (dx * dx + dy * dy).sqrt();
+                if r_xy < 1e-8 {
+                    return Some((0.0, 0.0));
+                }
+                let theta = r_xy.atan2(dz);
+                let r_img = 2.0 * (theta * 0.5).sin();
+                Some((r_img * dx / r_xy, r_img * dy / r_xy))
+            }
+            Self::FisheyeOrthographic => {
+                let r_xy = (dx * dx + dy * dy).sqrt();
+                if r_xy < 1e-8 {
+                    return Some((0.0, 0.0));
+                }
+                if dz < 0.0 {
+                    return None;
+                }
+                Some((dx, dy))
+            }
+            Self::FisheyeThoby => {
+                let r_xy = (dx * dx + dy * dy).sqrt();
+                if r_xy < 1e-8 {
+                    return Some((0.0, 0.0));
+                }
+                const K1: f32 = 1.47;
+                const K2: f32 = 0.713;
+                let theta = r_xy.atan2(dz);
+                let r_img = K1 * (K2 * theta).sin();
+                Some((r_img * dx / r_xy, r_img * dy / r_xy))
+            }
+            Self::Panoramic => {
+                let r_xz = (dx * dx + dz * dz).sqrt();
+                if r_xz < 1e-8 {
+                    return None;
+                }
+                let azimuth = dx.atan2(dz);
+                let y_out = dy / r_xz;
+                Some((azimuth, y_out))
+            }
+            Self::Equirectangular => {
+                let r_xz = (dx * dx + dz * dz).sqrt();
+                let azimuth = dx.atan2(dz);
+                let elevation = dy.atan2(r_xz);
+                Some((azimuth, elevation))
+            }
+        }
+    }
 }
 
 /// A camera body from the lensfun database.
@@ -1831,5 +1997,84 @@ mod tests {
             (mid.k1 + 0.25).abs() < 1e-6,
             "expected midpoint interpolation"
         );
+    }
+
+    #[test]
+    fn projection_to_sphere_origin_is_forward() {
+        for proj in [
+            LensProjection::Rectilinear,
+            LensProjection::Fisheye,
+            LensProjection::FisheyeStereographic,
+            LensProjection::FisheyeEquisolid,
+            LensProjection::FisheyeOrthographic,
+            LensProjection::FisheyeThoby,
+            LensProjection::Panoramic,
+            LensProjection::Equirectangular,
+        ] {
+            let (dx, dy, dz) = proj.to_sphere(0.0, 0.0).unwrap();
+            assert!(
+                (dx.abs() + dy.abs()) < 1e-6 && dz > 0.99,
+                "{proj:?}: origin should map to forward axis, got ({dx}, {dy}, {dz})"
+            );
+        }
+    }
+
+    #[test]
+    fn projection_round_trip_radial() {
+        let projs = [
+            LensProjection::Rectilinear,
+            LensProjection::Fisheye,
+            LensProjection::FisheyeStereographic,
+            LensProjection::FisheyeEquisolid,
+            LensProjection::FisheyeOrthographic,
+            LensProjection::FisheyeThoby,
+        ];
+        for proj in projs {
+            for &(x, y) in &[(0.3, 0.0), (0.0, 0.2), (0.1, 0.15)] {
+                let sphere = proj.to_sphere(x, y).unwrap();
+                let (x2, y2) = proj.from_sphere(sphere.0, sphere.1, sphere.2).unwrap();
+                assert!(
+                    (x2 - x).abs() < 1e-5 && (y2 - y).abs() < 1e-5,
+                    "{proj:?}: round trip ({x},{y}) -> ({x2},{y2})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn projection_round_trip_panoramic_equirect() {
+        for proj in [LensProjection::Panoramic, LensProjection::Equirectangular] {
+            for &(x, y) in &[(0.3, 0.1), (-0.2, 0.05), (0.0, 0.4)] {
+                let sphere = proj.to_sphere(x, y).unwrap();
+                let (x2, y2) = proj.from_sphere(sphere.0, sphere.1, sphere.2).unwrap();
+                assert!(
+                    (x2 - x).abs() < 1e-5 && (y2 - y).abs() < 1e-5,
+                    "{proj:?}: round trip ({x},{y}) -> ({x2},{y2})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn projection_fisheye_to_rectilinear_expands_edges() {
+        let x_in = 0.5;
+        let sphere = LensProjection::Fisheye.to_sphere(x_in, 0.0).unwrap();
+        let (x_out, _) = LensProjection::Rectilinear
+            .from_sphere(sphere.0, sphere.1, sphere.2)
+            .unwrap();
+        assert!(
+            x_out > x_in,
+            "rectilinear should stretch fisheye edges: {x_out} should be > {x_in}"
+        );
+    }
+
+    #[test]
+    fn projection_same_type_is_identity() {
+        let (x, y) = (0.4, 0.2);
+        let sphere = LensProjection::Fisheye.to_sphere(x, y).unwrap();
+        let (x2, y2) = LensProjection::Fisheye
+            .from_sphere(sphere.0, sphere.1, sphere.2)
+            .unwrap();
+        assert!((x2 - x).abs() < 1e-6 && (y2 - y).abs() < 1e-6);
     }
 }
