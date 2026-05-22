@@ -32,6 +32,39 @@ let profile = CorrectionProfile::builder(lens)
 
 ## Corrections
 
+The raw-slice methods operate on `&[u8]` / `&mut [u8]` buffers directly and
+do not require the `image` crate:
+
+| Method | Description |
+|--------|-------------|
+| `CorrectionProfile::correct_all_raw` | Vignetting, then composed distortion + TCA |
+| `CorrectionProfile::correct_distortion_raw` | Geometric warp only |
+| `CorrectionProfile::correct_vignetting_raw` | In-place brightness correction |
+| `CorrectionProfile::correct_tca_raw` | Per-channel warp only |
+
+For callers working with 16-bit linear sensor data, the `_u16` methods operate
+on `&[u16]` / `&mut [u16]` with values in `0..=65535` treated as linear:
+
+| Method | Description |
+|--------|-------------|
+| `CorrectionProfile::correct_all_raw_u16` | Vignetting, then composed distortion + TCA |
+| `CorrectionProfile::correct_distortion_raw_u16` | Geometric warp only |
+| `CorrectionProfile::correct_vignetting_raw_u16` | In-place brightness correction |
+| `CorrectionProfile::correct_tca_raw_u16` | Per-channel warp only |
+
+For HDR and raw-processing pipelines already working in linear light, the
+`_f32` methods avoid sRGB conversion and quantisation:
+
+| Method | Description |
+|--------|-------------|
+| `CorrectionProfile::correct_all_raw_f32` | Vignetting, then composed distortion + TCA |
+| `CorrectionProfile::correct_distortion_raw_f32` | Geometric warp only |
+| `CorrectionProfile::correct_vignetting_raw_f32` | In-place brightness correction |
+| `CorrectionProfile::correct_tca_raw_f32` | Per-channel warp only |
+
+With the default `image` feature enabled, convenience methods are available for
+`image::DynamicImage`:
+
 | Method | Description |
 |--------|-------------|
 | `CorrectionProfile::correct_all` | Vignetting, then composed distortion + TCA |
@@ -39,25 +72,49 @@ let profile = CorrectionProfile::builder(lens)
 | `CorrectionProfile::correct_vignetting` | In-place brightness correction |
 | `CorrectionProfile::correct_tca` | Per-channel warp only |
 
-For raw-processor integrations, `CorrectionProfile::distortion_coordinate_map`
-and `CorrectionProfile::tca_coordinate_map` expose source-coordinate maps for
-callers that own their resampling pipeline. `CorrectionOptions` provides
-stage selection while preserving Lensfun-style color-first ordering via the
-`correct_with_options_raw*` methods. `CoordinateMapOptions::reverse(true)`
-matches Lensfun's reverse-transform terminology.
+All pixel-buffer APIs support 3-channel RGB and 4-channel RGBA data. RGBA
+inputs preserve alpha. The `DynamicImage` convenience API supports
+`ImageRgb8` and `ImageRgba8`; other image formats return
+`Error::UnsupportedImageFormat`.
 
-The image correction API supports `DynamicImage::ImageRgb8` and
-`DynamicImage::ImageRgba8`. `Rgba8` inputs preserve alpha; other image formats
-return `Error::UnsupportedImageFormat`.
+For integrations that own their resampling pipeline,
+`CorrectionProfile::distortion_coordinate_map` and
+`CorrectionProfile::tca_coordinate_map` expose source-coordinate maps.
+`CorrectionOptions` provides stage selection while preserving Lensfun-style
+color-first ordering through the `correct_with_options_raw*` methods.
+`CoordinateMapOptions::reverse(true)` matches Lensfun's reverse-transform
+terminology.
+
+`CorrectionProfile::compute_autoscale` can compute a scale factor that keeps
+geometry-corrected output in bounds, and `CorrectionOptions::with_scale` /
+`CoordinateMapOptions::with_scale` can apply that scale to correction passes or
+coordinate-map generation.
 
 ## Database lookup
 
-`Database::find_camera`, `Database::find_lens_for_camera`, and
-`Database::find_lens_by_name_for_camera` perform case-insensitive substring
-matching, so EXIF strings rarely need to match exactly. The camera-aware lens
-lookups use the camera mount and crop factor to rank duplicate lens profiles.
+`Database::find_camera` returns the first camera match.
+`Database::find_cameras`, `Database::find_lenses`, and
+`Database::find_lenses_by_name` return iterators over all non-camera-aware
+matches. `Database::find_lens_for_camera` and
+`Database::find_lens_by_name_for_camera` use camera mount and crop factor to
+rank duplicate lens profiles.
+
 Use `find_lenses_for_camera` or `find_lenses_by_name_for_camera` to inspect
 ranked alternatives and surface ambiguous profile choices in a UI.
+`Database::find_lenses_by_name` accepts a single query string matched against
+the combined `"maker model"` lens text, which is useful when EXIF metadata
+provides only `LensModel` without a separate lens maker field.
+
+All lookup methods perform case-insensitive, normalised substring matching, so
+EXIF strings rarely need to match exactly.
+
+## Projection Support
+
+Lensfun projection metadata is parsed for cameras and lenses. A correction
+profile can target another projection with
+`CorrectionProfile::builder(lens).target_projection(...)`, and
+`CorrectionProfile::projection_mapping` reports when a profile includes
+projection conversion.
 
 ## Provenance
 
